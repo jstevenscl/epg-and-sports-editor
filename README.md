@@ -1,8 +1,8 @@
-# EPGeditARR
+# EPG & Sports Editor
 
 A [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) plugin that creates clean, transformed copies of your EPG sources, fills in missing EPG data, and includes a Sports Editor for auto-synced sports channel groups.
 
-> **SiriusXM channel management has moved.** As of this version, EPGeditARR no longer includes SiriusXM channel Fill/Sort/Rename/Logo tooling — that functionality is now maintained in the [Tickarr](https://github.com/jstevenscl/tickarr) plugin, which has a more advanced EPG and up-to-date logos. See the release notes for details.
+> **All SiriusXM/satellite radio functionality has moved.** EPG & Sports Editor no longer includes any SiriusXM tooling — channel Fill/Sort/Rename/Logo management, and the community SiriusXM EPG file, have both been removed. That functionality is now maintained in the [Ticker](https://github.com/jstevenscl/ticker) plugin, which sources channel/show data directly from StellarTunerLog's API and includes show schedules — a more advanced EPG than this repo's static file ever was. See the release notes for details.
 
 > **Think of it as a filter layer between your raw EPG feed and what your players see.** Original sources are never touched.
 
@@ -14,30 +14,30 @@ A [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) plugin that creates 
 
 Many EPG sources contain noise in program titles and descriptions: broadcast flags, quality tags, episode codes, and other artifacts injected by the data provider.
 
-| Raw title (what your EPG contains) | After EPGeditARR |
+| Raw title (what your EPG contains) | After EPG & Sports Editor |
 |---|---|
 | `The Daily Show  ᴺᵉʷ` | `The Daily Show` |
 | `Breaking Bad S01E01` | `Breaking Bad` |
 | `Movie Night [HD] (2019)` | `Movie Night (2019)` |
 | `Live Sports [LIVE]` | `Live Sports` |
 
-EPGeditARR creates a virtual copy of your EPG source and writes the transformed programs there. Your channels are reassigned automatically. The original EPG is left untouched.
+EPG & Sports Editor creates a virtual copy of your EPG source and writes the transformed programs there. Your channels are reassigned automatically. The original EPG is left untouched.
 
 Per-source, you can also **Force Category (Series Mode)** and **Synthesize Episode Numbers From Air Date** — useful when an EPG's bare-bones programs (title/description only, no episode data) get treated as duplicate movies by Plex instead of recordable series episodes. See Settings Reference below.
 
 ### Fill EPG
 
-For channels that have no EPG data at all, EPGeditARR can generate a repeating placeholder schedule. This gives every channel at least a title block in your TV guide instead of a blank entry.
+For channels that have no EPG data at all, EPG & Sports Editor can generate a repeating placeholder schedule. This gives every channel at least a title block in your TV guide instead of a blank entry.
 
 ### Sports Editor
 
-For channel groups that Dispatcharr's Auto Channel Sync populates automatically (e.g. an NFL Game Pass stream group), EPGeditARR can rename the auto-created channels using a dedicated rule set — configured per channel group, separate from the EPG Sources rules above. It runs automatically right after each successful M3U refresh, and only ever touches auto-created channels, never manually-added ones.
+For channel groups that Dispatcharr's Auto Channel Sync populates automatically (e.g. an NFL Game Pass stream group), EPG & Sports Editor can rename the auto-created channels using a dedicated rule set — configured per channel group, separate from the EPG Sources rules above. It runs automatically right after each successful M3U refresh, and only ever touches auto-created channels, never manually-added ones.
 
 Each channel group can also opt into **Sport Templates** (below) instead of, or alongside, plain rename rules — matching auto-created channels against a live public sports schedule and generating real channel names, logos, and a Pregame/Live/Postgame EPG from actual game data.
 
 ### Sport Templates
 
-For groups with a Sport Template selected, EPGeditARR fetches live schedule data from [sports-data-platform](https://api.tickarr.com) (a public feed shared across several sports-IPTV tools) and matches each auto-created channel against a real event in that sport, then — on a match — automatically:
+For groups with a Sport Template selected, EPG & Sports Editor fetches live schedule data from [sports-data-platform](https://api.tickarr.com) (a public feed shared across several sports-IPTV tools) and matches each auto-created channel against a real event in that sport, then — on a match — automatically:
 
 - **Renames the channel** using a `{variable}`-driven template (e.g. `Denver Broncos @ Atlanta Falcons`, or `Alex Michelsen vs Taylor Fritz` for tennis)
 - **Assigns a logo** via a matchup thumbnail/logo API ([sethwv/game-thumbs](https://github.com/sethwv/game-thumbs) — self-hostable, or use the public default instance) for team sports
@@ -45,28 +45,13 @@ For groups with a Sport Template selected, EPGeditARR fetches live schedule data
 
 **93 leagues are supported** — every major US team sport (NFL, NBA, MLB, NHL, NCAA Football, MLS, and dozens more including softball, volleyball, lacrosse, and NCAA variants), 30+ soccer competitions worldwide (Premier League, La Liga, Bundesliga, Serie A, Ligue 1, FIFA World Cup, and more), tennis (ATP/WTA), golf (PGA TOUR/LPGA), all three NASCAR series, Formula 1, UFC/MMA/boxing/darts, and a few niche sports (surfing, fishing). Two different matching engines run under the hood depending on the sport — team/individual matchup sports split the channel name into two competitors, while golf/NASCAR/F1-style sports match one descriptive event title instead — but this is automatic per sport, nothing to configure. See the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#full-league-list)** for the complete list.
 
-All scheduling is UTC-anchored, matching Dispatcharr's own timezone-neutral convention — every variable is also available in a US Eastern/Central-formatted flavor (`{start_time_et_ct}`, etc., matching broadcast-standard convention for these leagues) and a plain UTC flavor (`{start_time_utc}`, etc.) side by side, so templates read correctly for viewers anywhere.
+All scheduling is UTC-anchored, matching Dispatcharr's own timezone-neutral convention — every variable is also available in a US Eastern/Central-formatted flavor (`{start_time_et_ct}`, etc., matching broadcast-standard convention for these leagues) and a plain UTC flavor (`{start_time_utc}`, etc.) side by side, so templates read correctly for viewers anywhere. An optional instance-wide **Local Display Timezone** setting (any IANA zone name) additionally unlocks a `{start_time_local}` flavor, DST-correct, for instances whose audience isn't US-based.
 
 If a channel can't be confidently matched to a real game, the group's regular Rename Rules still apply as a fallback (or run standalone if no Sport Template is selected). See **Sport Templates Guide** below for the full setup walkthrough, variable reference, matching-engine caveats, and starter templates per league.
 
-### Community SiriusXM EPG
-
-EPGeditARR publishes a ready-to-use XMLTV EPG file covering all SiriusXM channels — no plugin required. Add it directly to any IPTV player or DVR that accepts an XMLTV URL:
-
-```
-https://jstevenscl.github.io/epgeditarr/siriusxm_epg.xml
-```
-
-- **771 channels** — all SiriusXM channels from the official lineup plus sport play-by-play feeds
-- **Sports channels** get smart blocks: Upcoming → LIVE → Post-game
-- **All other channels** get repeating fill blocks with real SiriusXM descriptions
-- **14 days** of schedule generated, refreshed every 4 hours
-- **Channel logos** included via `<icon>` tags for matched channels
-- Set your channel's `tvg-id` to the SiriusXM channel name (e.g. `SiriusXM NFL Radio`, `SiriusXM NBA Radio`) to match the EPG
-
 ---
 
-![EPGeditARR installed in Dispatcharr](docs/screenshots/01_plugin_installed.png)
+![EPG & Sports Editor installed in Dispatcharr](docs/screenshots/01_plugin_installed.png)
 
 ## Installation
 
@@ -75,9 +60,9 @@ https://jstevenscl.github.io/epgeditarr/siriusxm_epg.xml
 1. In Dispatcharr, go to **Plugins → Find Plugins → Manage Repos → Add Repository**
 2. Paste this URL:
    ```
-   https://jstevenscl.github.io/epgeditarr/manifest.json
+   https://jstevenscl.github.io/epg-and-sports-editor/manifest.json
    ```
-3. Click **Add Repo**, then find **EPGeditARR** in the list and install it
+3. Click **Add Repo**, then find **EPG & Sports Editor** in the list and install it
 
 ### Manual Install
 
@@ -91,7 +76,7 @@ Copy `plugin.py` and `plugin.json` into your Dispatcharr plugins directory and r
 
 Before writing any rules, use **Sample Data** to see what tags and patterns actually exist in your sources.
 
-1. Open EPGeditARR → **Actions tab**
+1. Open EPG & Sports Editor → **Actions tab**
 2. Click **Sample Data**
 
 The output groups programs by category (episode codes, broadcast flags, quality tags, unicode flags, etc.) and shows real before/after examples.
@@ -100,7 +85,7 @@ The output groups programs by category (episode codes, broadcast flags, quality 
 
 ### Step 2 — Build your rules
 
-Use the **[Rule Designer](https://jstevenscl.github.io/epgeditarr/designer.html)** to pick rules from a preset library or build your own. Copy the generated rules text when you're done.
+Use the **[Rule Designer](https://jstevenscl.github.io/epg-and-sports-editor/designer.html)** to pick rules from a preset library or build your own. Copy the generated rules text when you're done.
 
 ![Rule Designer — preset selected with live results](docs/screenshots/05_rule_designer_active.png)
 
@@ -114,7 +99,7 @@ Common presets:
 
 ### Step 3 — Enable a source and add rules
 
-1. Open EPGeditARR → **Settings tab**
+1. Open EPG & Sports Editor → **Settings tab**
 2. Find the EPG source you want to clean
 3. Toggle **Enable transformation** ON
 4. Paste your rules into **Title Rules** (and/or Sub-Title / Description Rules)
@@ -128,7 +113,7 @@ Click **Preview** in the Actions tab. Shows exactly which programs would change 
 ### Step 5 — Run Setup
 
 Click **Setup** in the Actions tab. This:
-- Creates a virtual EPG source (`EPGeditARR: [Your Source Name]`)
+- Creates a virtual EPG source (`EPG & Sports Editor: [Your Source Name]`)
 - Transforms all programs and writes them to the virtual source
 - Reassigns your channels to the virtual source automatically
 
@@ -166,13 +151,13 @@ Click **Fill** to generate the schedules. Channels in your Fill Groups that have
 
 In Dispatcharr's M3U account settings, enable Auto Channel Sync for the stream group you want (e.g. an NFL Game Pass group), and optionally target a dedicated channel group via the override option so auto-created channels land somewhere isolated from your production lineup.
 
-### Step 2 — Enable the channel group in EPGeditARR
+### Step 2 — Enable the channel group in EPG & Sports Editor
 
 In Settings, find the section for that channel group and toggle it on, then add Rename Rules (same `regex::`/`replace::` format as EPG Sources rules — see Rule Format below).
 
 ### Step 3 — Let it run automatically, or trigger it manually
 
-After Dispatcharr's Auto Channel Sync creates channels on the next M3U refresh, EPGeditARR renames them automatically — no manual step needed. To apply rule changes to already-existing auto-created channels without waiting for the next refresh, click **Rename Sports Channels Now**.
+After Dispatcharr's Auto Channel Sync creates channels on the next M3U refresh, EPG & Sports Editor renames them automatically — no manual step needed. To apply rule changes to already-existing auto-created channels without waiting for the next refresh, click **Rename Sports Channels Now**.
 
 ### Step 4 — (Optional) Turn on Sport Templates for real game data
 
@@ -195,7 +180,7 @@ Want real channel names, logos, and a Pregame/Live/Postgame EPG instead of just 
 | **Run Sport Templates Now** | Match each Sport-Template-enabled group's auto-created channels against the live schedule right now — renames matches, assigns logos, and generates Pregame/Live/Postgame EPG data. |
 | **Show Status** | Shows which sources are enabled, program counts, Fill EPG status, and configured rules. |
 | **Teardown** | Removes all virtual EPG sources (including Fill EPG) and reassigns channels back to their originals. |
-| **Restart Dispatcharr** | Reloads Dispatcharr's backend process so it picks up a plugin update — run this after every EPGeditARR install/update. Not a full container restart; the page goes offline for about 15 seconds. |
+| **Restart Dispatcharr** | Reloads Dispatcharr's backend process so it picks up a plugin update — run this after every EPG & Sports Editor install/update. Not a full container restart; the page goes offline for about 15 seconds. |
 
 ---
 
@@ -209,7 +194,7 @@ regex::PATTERN::REPLACEMENT
 ```
 - `PATTERN` is a Python regex
 - Leave `REPLACEMENT` empty to strip the match entirely
-- Use `$1`, `$2` for capture groups (EPGeditARR converts these to `\1`, `\2` internally)
+- Use `$1`, `$2` for capture groups (EPG & Sports Editor converts these to `\1`, `\2` internally)
 
 ### Find/replace rule
 ```
@@ -337,7 +322,7 @@ You can also paste specific text into **Test Text** to test against that instead
 
 ## Rule Designer
 
-The **[Rule Designer](https://jstevenscl.github.io/epgeditarr/designer.html)** is a standalone web tool for building rules visually.
+The **[Rule Designer](https://jstevenscl.github.io/epg-and-sports-editor/designer.html)** is a standalone web tool for building rules visually.
 
 - Browse the preset library and add rules with one click
 - Test patterns against sample text in real time
@@ -350,7 +335,7 @@ The **[Rule Designer](https://jstevenscl.github.io/epgeditarr/designer.html)** i
 ## FAQ
 
 **Do my original EPG sources get modified?**
-No. EPGeditARR only writes to the virtual (dummy) EPG sources it creates. Your original sources are read-only.
+No. EPG & Sports Editor only writes to the virtual (dummy) EPG sources it creates. Your original sources are read-only.
 
 **What happens when my EPG refreshes?**
 The plugin listens for Dispatcharr's EPG refresh completion signal. When a source you've enabled finishes refreshing, the transform and Fill EPG both run automatically.
@@ -364,17 +349,17 @@ No — click **Apply Now**. Setup is only needed when adding a new source for th
 **Something looks wrong. How do I undo everything?**
 Click **Teardown**. This deletes all virtual EPG sources (including Fill EPG) and reassigns your channels back to their original sources.
 
-**Clicking Dispatcharr's own refresh icon (⟳) on an "EPGeditARR: ..." row in M3U & EPG Manager gives an error about the source URL.**
-Expected — EPGeditARR's virtual/generated EPG sources (transform virtuals, Fill EPG, Sports Editor) intentionally have no URL, since EPGeditARR writes their program data directly instead of Dispatcharr fetching it. Dispatcharr's native per-source refresh only knows how to fetch a URL, so it always fails on these with something like "Failed to download EPG data, cannot parse programs." This only flips that source's Status column to "Error" — it never touches your actual EPG data. Always use the plugin's own Actions tab buttons (**Apply Now**, **Fill**, **Run Sport Templates Now**) to refresh EPGeditARR-managed data; running any of them restores the Status column to "Success."
+**Clicking Dispatcharr's own refresh icon (⟳) on an "EPG & Sports Editor: ..." row in M3U & EPG Manager gives an error about the source URL.**
+Expected — EPG & Sports Editor's virtual/generated EPG sources (transform virtuals, Fill EPG, Sports Editor) intentionally have no URL, since EPG & Sports Editor writes their program data directly instead of Dispatcharr fetching it. Dispatcharr's native per-source refresh only knows how to fetch a URL, so it always fails on these with something like "Failed to download EPG data, cannot parse programs." This only flips that source's Status column to "Error" — it never touches your actual EPG data. Always use the plugin's own Actions tab buttons (**Apply Now**, **Fill**, **Run Sport Templates Now**) to refresh EPG & Sports Editor-managed data; running any of them restores the Status column to "Success."
 
 **The unicode broadcast flags (`ᴺᵉʷ`, `ᴸᶦᵛᵉ`) show zero matches in Sample Data.**
 These are provider-specific — not all EPG sources include them. Use Sample Data with each enabled source individually to find which one has them. They're typically found in Gracenote-sourced or aggregator feeds.
 
 **I updated Dispatcharr and now plugin action buttons don't show any output.**
-This is a known display-only regression, present since Dispatcharr v0.25.0 and still occurring as of v0.29.0. When you click an action button (Status, Fill, Run Sport Templates, etc.) the action runs correctly on the backend and all data is written — the result text just doesn't render in the modal UI. To confirm an action completed, click **Show Status** which will show current program counts and source state. All functionality continues to work normally. No change to EPGeditARR is needed.
+This is a known display-only regression, present since Dispatcharr v0.25.0 and still occurring as of v0.29.0. When you click an action button (Status, Fill, Run Sport Templates, etc.) the action runs correctly on the backend and all data is written — the result text just doesn't render in the modal UI. To confirm an action completed, click **Show Status** which will show current program counts and source state. All functionality continues to work normally. No change to EPG & Sports Editor is needed.
 
 **Where did SiriusXM channel management go?**
-It's been removed from EPGeditARR as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Tickarr](https://github.com/jstevenscl/tickarr) plugin.
+It's been removed from EPG & Sports Editor as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Ticker](https://github.com/jstevenscl/ticker) plugin.
 
 ---
 

@@ -1,28 +1,39 @@
 """
-EPGeditARR — Dispatcharr Plugin
+EPG & Sports Editor — Dispatcharr Plugin
 Maintains transformed virtual copies of EPG sources using per-source, per-field
 regex and find/replace rules. Fields are generated dynamically from the DB so
 any user's EPG sources appear as toggles without hardcoded names.
 
-Also generates fill EPG schedules for channels with no EPG data.
+Also generates fill EPG schedules for channels with no EPG data, and includes
+a Sports Editor that matches auto-synced channels against live schedule data.
 """
 
 import logging
 import re
 from django.db import transaction
 
-LOGGER = logging.getLogger("plugins.epgeditarr")
-VIRTUAL_PREFIX = "EPGeditARR: "
-PLUGIN_KEY = "epgeditarr"
+LOGGER = logging.getLogger("plugins.epg-and-sports-editor")
+VIRTUAL_PREFIX = "EPG & Sports Editor: "
+PLUGIN_KEY = "epg-and-sports-editor"
 
-FILL_SOURCE_NAME = "EPGeditARR: Fill"
+# Pre-rename identifiers (this plugin shipped as "EPGeditARR"/"epgeditarr" through
+# v0.3.03) — kept around solely so _migrate_from_legacy_key() can find and carry
+# forward an existing install's settings/virtual EPG sources without orphaning them.
+_LEGACY_PLUGIN_KEY = "epgeditarr"
+_LEGACY_VIRTUAL_PREFIX = "EPGeditARR: "
+_LEGACY_CUSTOM_PROP_KEYS = {
+    "epgeditarr_source_id": "epg_and_sports_editor_source_id",
+    "epgeditarr_sports": "epg_and_sports_editor_sports",
+    "epgeditarr_fill": "epg_and_sports_editor_fill",
+}
+
+FILL_SOURCE_NAME = "EPG & Sports Editor: Fill"
 FILL_CACHE_KEY = "fill_channel_cache"
 FILL_CACHE_UPDATED_KEY = "fill_channel_cache_updated"
 FILL_CACHE_TTL_DAYS = 7
-UNMATCHED_LOG_KEY = "sxm_unmatched_log"
 
 SDP_SCHEDULE_URL = "https://api.tickarr.com/v1/schedule.json"
-SPORTS_EPG_SOURCE_NAME = "EPGeditARR: Sports Editor"
+SPORTS_EPG_SOURCE_NAME = "EPG & Sports Editor: Sports Editor"
 SDP_CACHE_KEY = "sdp_schedule_cache"
 SDP_CACHE_UPDATED_KEY = "sdp_schedule_cache_updated"
 SDP_CACHE_TTL_SECS = 30 * 60
@@ -392,8 +403,8 @@ _RULE_FORMAT_HELP = (
 
 
 class Plugin:
-    name = "EPGeditARR"
-    version = "0.3.03"
+    name = "EPG & Sports Editor"
+    version = "0.4.00"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -403,12 +414,57 @@ class Plugin:
     )
 
     def __init__(self):
-        self._signal_uid = "epgeditarr_transform"
-        self._m3u_signal_uid = "epgeditarr_sports_editor"
+        self._signal_uid = "epg_and_sports_editor_transform"
+        self._m3u_signal_uid = "epg_and_sports_editor_sports_editor"
+        self._migrate_from_legacy_key()
         self.fields = self._build_fields()
-        LOGGER.info("EPGeditARR: initialized")
+        LOGGER.info("EPG & Sports Editor: initialized")
         self._connect_signal()
         self._connect_m3u_signal()
+
+    def _migrate_from_legacy_key(self):
+        """One-time, non-destructive carryover from the pre-rename "epgeditarr"
+        install (through v0.3.03): copies its PluginConfig.settings forward under
+        this plugin's new key if the new key has no settings yet, and renames
+        (in place, not delete+recreate — so existing EPGData/ProgramData/Channel
+        foreign keys stay intact) any virtual EPGSource still under the old
+        "EPGeditARR: " name prefix. Safe to run on every init: guarded by a
+        `_migrated_from_epgeditarr` flag written into the new settings so it's a
+        no-op after the first successful run, and a no-op entirely for a fresh
+        install that never had the old "epgeditarr" key."""
+        try:
+            from apps.plugins.models import PluginConfig
+            new_cfg = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
+            if not new_cfg:
+                return
+            new_settings = dict(new_cfg.settings or {})
+            if not new_settings.get("_migrated_from_epgeditarr"):
+                old_cfg = PluginConfig.objects.filter(key=_LEGACY_PLUGIN_KEY).first()
+                if old_cfg and old_cfg.settings and not new_settings:
+                    new_settings = dict(old_cfg.settings)
+                    LOGGER.info(
+                        "EPG & Sports Editor: carried settings forward from the "
+                        "legacy 'epgeditarr' plugin install"
+                    )
+                new_settings["_migrated_from_epgeditarr"] = True
+                new_cfg.settings = new_settings
+                new_cfg.save(update_fields=["settings"])
+
+            from apps.epg.models import EPGSource
+            renamed = 0
+            for src in EPGSource.objects.filter(name__startswith=_LEGACY_VIRTUAL_PREFIX):
+                src.name = VIRTUAL_PREFIX + src.name[len(_LEGACY_VIRTUAL_PREFIX):]
+                props = dict(src.custom_properties or {})
+                for old_key, new_key in _LEGACY_CUSTOM_PROP_KEYS.items():
+                    if old_key in props:
+                        props[new_key] = props.pop(old_key)
+                src.custom_properties = props
+                src.save(update_fields=["name", "custom_properties"])
+                renamed += 1
+            if renamed:
+                LOGGER.info(f"EPG & Sports Editor: renamed {renamed} legacy virtual EPG source(s) in place")
+        except Exception as e:
+            LOGGER.debug(f"EPG & Sports Editor: legacy migration check failed (non-fatal): {e}")
 
     # ── Dynamic field generation ──────────────────────────────────────────
     # Fields are built from the live DB so every user sees their own EPG
@@ -539,7 +595,7 @@ class Plugin:
             group_ids_with_channels = Channel.objects.values_list("channel_group_id", flat=True).distinct()
             groups = list(ChannelGroup.objects.filter(id__in=group_ids_with_channels).order_by("name"))
         except Exception as e:
-            LOGGER.debug(f"EPGeditARR: could not load channel groups for field generation: {e}")
+            LOGGER.debug(f"EPG & Sports Editor: could not load channel groups for field generation: {e}")
 
         fields = [
             {
@@ -628,6 +684,22 @@ class Plugin:
             ),
         })
 
+        fields.append({
+            "id": "sports_editor_display_tz",
+            "label": "Local Display Timezone (optional)",
+            "type": "text",
+            "default": "",
+            "placeholder": "e.g. Australia/Sydney, Europe/London, America/Los_Angeles",
+            "help_text": (
+                "Optional IANA timezone name (see https://en.wikipedia.org/wiki/List_of_tz_database_time_zones "
+                "for the full list). When set, enables the {start_time_local} / {start_short_local} / "
+                "{start_day_local} / {start_date_local} template variables, converted from UTC with correct "
+                "DST handling, for use alongside the existing US Eastern/Central and UTC variables. This is "
+                "instance-wide — every viewer of this Dispatcharr instance sees the same local time, so pick "
+                "the timezone that matches most of your audience. Leave blank to leave those variables unset."
+            ),
+        })
+
         return fields
 
     # Template variable placeholders offered for every Sport Template field —
@@ -635,7 +707,9 @@ class Plugin:
     _SPORT_TEMPLATE_VAR_HELP = (
         "Variables: {away_team} {home_team} {away_team_pascal} {home_team_pascal} "
         "{start_short} {start_day} {start_date} {start_time_et_ct} "
-        "{start_short_utc} {start_day_utc} {start_date_utc} {start_time_utc} {game_number_suffix} "
+        "{start_short_utc} {start_day_utc} {start_date_utc} {start_time_utc} "
+        "{start_short_local} {start_day_local} {start_date_local} {start_time_local} "
+        "(local vars need Local Display Timezone set above — blank otherwise) {game_number_suffix} "
         "{broadcast} {broadcast_line} {venue} {venue_line} {winner} {loser} {score_line} "
         "{league} {league_slug} {gamethumbs_base} {phase}\n"
         "Tennis (ATP/WTA) also has: {tournament_name} {round_name} {court} {court_line} "
@@ -757,7 +831,7 @@ class Plugin:
             from apps.epg.models import EPGSource
             sources = list(EPGSource.objects.exclude(name__startswith=VIRTUAL_PREFIX).order_by("name"))
         except Exception as e:
-            LOGGER.debug(f"EPGeditARR: could not load sources for field generation: {e}")
+            LOGGER.debug(f"EPG & Sports Editor: could not load sources for field generation: {e}")
 
         # ── Source rule sections ──
         fields = [
@@ -963,22 +1037,22 @@ class Plugin:
                     return
                 settings = cfg.settings
             except Exception as e:
-                LOGGER.debug(f"EPGeditARR: signal could not read settings: {e}")
+                LOGGER.debug(f"EPG & Sports Editor: signal could not read settings: {e}")
                 return
 
             if settings.get(f"src_{instance.id}_enabled", False):
-                LOGGER.info(f"EPGeditARR: '{instance.name}' refreshed — transforming")
+                LOGGER.info(f"EPG & Sports Editor: '{instance.name}' refreshed — transforming")
                 try:
                     self._do_transform_source(instance, settings)
                 except Exception as e:
-                    LOGGER.error(f"EPGeditARR: transform failed for '{instance.name}': {e}")
+                    LOGGER.error(f"EPG & Sports Editor: transform failed for '{instance.name}': {e}")
 
             if settings.get("fill_groups", "").strip():
-                LOGGER.info(f"EPGeditARR: running Fill EPG after '{instance.name}' refresh")
+                LOGGER.info(f"EPG & Sports Editor: running Fill EPG after '{instance.name}' refresh")
                 try:
                     self._action_fill_epg(settings, LOGGER)
                 except Exception as e:
-                    LOGGER.error(f"EPGeditARR: auto Fill EPG failed: {e}")
+                    LOGGER.error(f"EPG & Sports Editor: auto Fill EPG failed: {e}")
 
         post_save.connect(
             _on_epg_refresh,
@@ -986,13 +1060,13 @@ class Plugin:
             weak=False,
             dispatch_uid=self._signal_uid,
         )
-        LOGGER.info("EPGeditARR: refresh signal connected")
+        LOGGER.info("EPG & Sports Editor: refresh signal connected")
 
     def _disconnect_signal(self):
         from apps.epg.models import EPGSource
         from django.db.models.signals import post_save
         post_save.disconnect(sender=EPGSource, dispatch_uid=self._signal_uid)
-        LOGGER.info("EPGeditARR: signal disconnected")
+        LOGGER.info("EPG & Sports Editor: signal disconnected")
 
     # One signal watches M3UAccount. Auto Channel Sync (Dispatcharr core) already
     # runs and finishes by the time the account's status flips to "success", so
@@ -1014,28 +1088,28 @@ class Plugin:
                     return
                 settings = cfg.settings
             except Exception as e:
-                LOGGER.debug(f"EPGeditARR: sports editor signal could not read settings: {e}")
+                LOGGER.debug(f"EPG & Sports Editor: sports editor signal could not read settings: {e}")
                 return
 
             try:
                 result = self._run_sports_editor_rename(instance, settings)
                 if result.get("renamed"):
                     LOGGER.info(
-                        f"EPGeditARR: Sports Editor renamed {result['renamed']} channel(s) "
+                        f"EPG & Sports Editor: Sports Editor renamed {result['renamed']} channel(s) "
                         f"after '{instance.name}' refresh"
                     )
             except Exception as e:
-                LOGGER.error(f"EPGeditARR: Sports Editor rename failed after '{instance.name}' refresh: {e}")
+                LOGGER.error(f"EPG & Sports Editor: Sports Editor rename failed after '{instance.name}' refresh: {e}")
 
             try:
                 epg_result = self._run_sports_editor_epg(instance, settings)
                 if epg_result.get("matched"):
                     LOGGER.info(
-                        f"EPGeditARR: Sports Editor generated EPG for {epg_result['matched']} "
+                        f"EPG & Sports Editor: Sports Editor generated EPG for {epg_result['matched']} "
                         f"channel(s) after '{instance.name}' refresh"
                     )
             except Exception as e:
-                LOGGER.error(f"EPGeditARR: Sports Editor EPG generation failed after '{instance.name}' refresh: {e}")
+                LOGGER.error(f"EPG & Sports Editor: Sports Editor EPG generation failed after '{instance.name}' refresh: {e}")
 
         post_save.connect(
             _on_m3u_refresh,
@@ -1043,13 +1117,13 @@ class Plugin:
             weak=False,
             dispatch_uid=self._m3u_signal_uid,
         )
-        LOGGER.info("EPGeditARR: sports editor M3U signal connected")
+        LOGGER.info("EPG & Sports Editor: sports editor M3U signal connected")
 
     def _disconnect_m3u_signal(self):
         from apps.m3u.models import M3UAccount
         from django.db.models.signals import post_save
         post_save.disconnect(sender=M3UAccount, dispatch_uid=self._m3u_signal_uid)
-        LOGGER.info("EPGeditARR: sports editor M3U signal disconnected")
+        LOGGER.info("EPG & Sports Editor: sports editor M3U signal disconnected")
 
     def stop(self, context):
         self._disconnect_signal()
@@ -1065,7 +1139,7 @@ class Plugin:
                 continue
             parts = line.split("::")
             if len(parts) < 3:
-                LOGGER.warning(f"EPGeditARR: malformed rule skipped: {line!r}")
+                LOGGER.warning(f"EPG & Sports Editor: malformed rule skipped: {line!r}")
                 continue
             kind, arg1, arg2 = parts[0].strip().lower(), parts[1], parts[2]
             if kind == "regex":
@@ -1079,11 +1153,11 @@ class Plugin:
                         "raw": arg1,
                     })
                 except re.error as e:
-                    LOGGER.warning(f"EPGeditARR: bad regex '{arg1}': {e}")
+                    LOGGER.warning(f"EPG & Sports Editor: bad regex '{arg1}': {e}")
             elif kind in ("replace", "find_replace"):
                 rules.append({"type": "replace", "find": arg1, "replacement": arg2})
             else:
-                LOGGER.warning(f"EPGeditARR: unknown rule type '{kind}' — skipping")
+                LOGGER.warning(f"EPG & Sports Editor: unknown rule type '{kind}' — skipping")
         return rules
 
     def _apply_rules(self, value, rules):
@@ -1201,7 +1275,7 @@ class Plugin:
             cfg.settings = data
             cfg.save(update_fields=["settings"])
         except Exception as e:
-            LOGGER.debug(f"EPGeditARR: could not save plugin setting '{key}': {e}")
+            LOGGER.debug(f"EPG & Sports Editor: could not save plugin setting '{key}': {e}")
 
     def _fetch_sdp_schedule(self, settings):
         """Fetch the public sports-data-platform schedule feed (api.tickarr.com),
@@ -1229,7 +1303,7 @@ class Plugin:
             resp.raise_for_status()
             events = resp.json().get("events", [])
         except Exception as e:
-            LOGGER.warning(f"EPGeditARR: SDP schedule fetch failed, using cache if available: {e}")
+            LOGGER.warning(f"EPG & Sports Editor: SDP schedule fetch failed, using cache if available: {e}")
             return self._inherit_tournament_names(cached or [])
 
         self._save_plugin_setting(SDP_CACHE_KEY, events)
@@ -1569,7 +1643,38 @@ class Plugin:
         start_time_utc = f"{fmt(dt_utc)} UTC"
         return start_short_utc, start_day_utc, start_date_utc, start_time_utc
 
-    def _build_sdp_template_vars(self, event, gamethumbs_base, league_label, phase, feed_tag=""):
+    @staticmethod
+    def _local_time_strs(dt_utc, tz_name):
+        """Return (start_short_local, start_day_local, start_date_local,
+        start_time_local) converted from UTC into the instance-configured
+        `tz_name` (an IANA zone, e.g. "Europe/London") via the stdlib zoneinfo
+        module — DST-correct, unlike a fixed numeric offset. Returns four blank
+        strings if `tz_name` is unset or not a recognized zone, so templates
+        using these variables degrade gracefully rather than erroring."""
+        if not tz_name:
+            return "", "", "", ""
+        try:
+            from zoneinfo import ZoneInfo
+            local = dt_utc.astimezone(ZoneInfo(tz_name))
+        except Exception:
+            return "", "", "", ""
+
+        _DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+        def fmt(d):
+            hour = d.hour % 12 or 12
+            ampm = "AM" if d.hour < 12 else "PM"
+            return f"{hour}:{d.minute:02d} {ampm}"
+
+        tz_label = local.tzname() or tz_name
+        start_short_local = fmt(local)
+        start_day_local = _DAYS[local.weekday()]
+        start_date_local = f"{_MONTHS[local.month - 1]} {local.day}"
+        start_time_local = f"{fmt(local)} {tz_label}"
+        return start_short_local, start_day_local, start_date_local, start_time_local
+
+    def _build_sdp_template_vars(self, event, gamethumbs_base, league_label, phase, feed_tag="", display_tz=""):
         from datetime import datetime
 
         away_name = event.get("away_team_name") or event.get("away_team_abbr") or "Away"
@@ -1580,6 +1685,7 @@ class Plugin:
         start = datetime.fromisoformat(event["start_time_utc"].replace("Z", "+00:00"))
         start_short, start_day, start_date, start_time_et_ct = self._us_time_strs(start)
         start_short_utc, start_day_utc, start_date_utc, start_time_utc = self._utc_time_strs(start)
+        start_short_local, start_day_local, start_date_local, start_time_local = self._local_time_strs(start, display_tz)
 
         game_number = event.get("game_number")
         game_number_suffix = f" (Game {game_number})" if game_number else ""
@@ -1645,6 +1751,10 @@ class Plugin:
             "start_day_utc": start_day_utc,
             "start_date_utc": start_date_utc,
             "start_time_utc": start_time_utc,
+            "start_short_local": start_short_local,
+            "start_day_local": start_day_local,
+            "start_date_local": start_date_local,
+            "start_time_local": start_time_local,
             "game_number_suffix": game_number_suffix,
             "broadcast": broadcast,
             "broadcast_line": broadcast_line,
@@ -1678,7 +1788,7 @@ class Plugin:
         try:
             return template_str.format_map(_SafeDict(vars_dict))
         except Exception as e:
-            LOGGER.warning(f"EPGeditARR: sport template render failed ({e}): {template_str!r}")
+            LOGGER.warning(f"EPG & Sports Editor: sport template render failed ({e}): {template_str!r}")
             return template_str
 
     def _sports_editor_epg_source(self):
@@ -1690,11 +1800,11 @@ class Plugin:
         # refresh task just fails gracefully (status="error", no data loss) if a user ever
         # clicks Refresh on it, since we write ProgramData ourselves and never rely on
         # Dispatcharr's fetch/parse cycle for this source. Matches the same source_type
-        # EDM's Sports Engine and Tickarr use for their own generated EPG sources.
+        # EDM's Sports Engine and Ticker use for their own generated EPG sources.
         from apps.epg.models import EPGSource
         source, created = EPGSource.objects.get_or_create(
             name=SPORTS_EPG_SOURCE_NAME,
-            defaults={"source_type": "xmltv", "custom_properties": {"epgeditarr_sports": True}},
+            defaults={"source_type": "xmltv", "custom_properties": {"epg_and_sports_editor_sports": True}},
         )
         if not created and source.source_type != "xmltv":
             EPGSource.objects.filter(pk=source.pk).update(source_type="xmltv")
@@ -1778,9 +1888,12 @@ class Plugin:
             return False
 
         gamethumbs_base = settings.get("sports_editor_gamethumbs_url") or "https://game-thumbs.tickarr.com"
+        display_tz = settings.get("sports_editor_display_tz") or ""
         league_label = _SPORT_TEMPLATES.get(sport_slug, sport_slug)
         defaults = self._sport_default_templates(sport_slug)
-        vars_base = self._build_sdp_template_vars(event, gamethumbs_base, league_label, "pregame", feed_tag=feed_tag)
+        vars_base = self._build_sdp_template_vars(
+            event, gamethumbs_base, league_label, "pregame", feed_tag=feed_tag, display_tz=display_tz
+        )
 
         channel_name_tpl = settings.get(f"sport_tpl_{sport_slug}_channel_name") or defaults["channel_name"]
         new_name = self._render_sports_template(channel_name_tpl, vars_base)
@@ -1796,7 +1909,7 @@ class Plugin:
                 ch.logo = logo_obj
                 ch.save(update_fields=["logo"])
 
-        tvg_id = f"epgeditarr-sports-{ch.id}"
+        tvg_id = f"epg-and-sports-editor-sports-{ch.id}"
         epg_entry, _ = EPGData.objects.get_or_create(
             tvg_id=tvg_id, epg_source=epg_source, defaults={"name": ch.name, "icon_url": ""},
         )
@@ -1820,7 +1933,9 @@ class Plugin:
             (est_end, post_end, "post_title", "post_desc", "postgame"),
         ]:
             default_title, default_desc = defaults[title_key], defaults[desc_key]
-            v = self._build_sdp_template_vars(event, gamethumbs_base, league_label, phase, feed_tag=feed_tag)
+            v = self._build_sdp_template_vars(
+                event, gamethumbs_base, league_label, phase, feed_tag=feed_tag, display_tz=display_tz
+            )
             title = self._render_sports_template(
                 settings.get(f"sport_tpl_{sport_slug}_{title_key}") or default_title, v
             )
@@ -1861,7 +1976,7 @@ class Plugin:
                         if self._process_sports_editor_channel(ch, sport, events, settings, epg_source):
                             matched += 1
                     except Exception as e:
-                        LOGGER.warning(f"EPGeditARR: sports editor EPG match failed for '{ch.name}': {e}")
+                        LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
 
         self._mark_epg_source_success(
             epg_source, f"Sports Editor: {matched} channel(s) matched, {scanned} scanned"
@@ -1909,7 +2024,7 @@ class Plugin:
                             if len(examples) < 5:
                                 examples.append(f"  '{old_name}' -> '{ch.name}'")
                     except Exception as e:
-                        LOGGER.warning(f"EPGeditARR: sports editor EPG match failed for '{ch.name}': {e}")
+                        LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
                 total_scanned += len(channels)
                 total_matched += group_matched
                 lines.append(
@@ -1977,14 +2092,14 @@ class Plugin:
             name=virtual_name,
             defaults={
                 "source_type": "xmltv",
-                "custom_properties": {"epgeditarr_source_id": source.id},
+                "custom_properties": {"epg_and_sports_editor_source_id": source.id},
             },
         )
         if not created:
             fields_to_update = {}
             props = dict(virtual.custom_properties or {})
-            if props.get("epgeditarr_source_id") != source.id:
-                props["epgeditarr_source_id"] = source.id
+            if props.get("epg_and_sports_editor_source_id") != source.id:
+                props["epg_and_sports_editor_source_id"] = source.id
                 fields_to_update["custom_properties"] = props
             if virtual.source_type != "xmltv":
                 fields_to_update["source_type"] = "xmltv"
@@ -2021,7 +2136,7 @@ class Plugin:
 
     def _channel_tvg_id(self, channel_name):
         slug = re.sub(r'[^a-z0-9]+', '-', channel_name.lower()).strip('-')
-        return f"epgeditarr-fill-{slug}"
+        return f"epg-and-sports-editor-fill-{slug}"
 
     def _get_fill_channels(self, settings):
         """Return Channel objects eligible for fill EPG (in fill groups, no EPG or on a dummy source)."""
@@ -2146,7 +2261,7 @@ class Plugin:
 
         n_channels = len(assigned_tvg_ids) if assigned_tvg_ids else "all"
         LOGGER.info(
-            f"EPGeditARR: '{source.name}' — {total} programs written "
+            f"EPG & Sports Editor: '{source.name}' — {total} programs written "
             f"({n_channels} channel(s) scoped)"
         )
         return total
@@ -2176,7 +2291,7 @@ class Plugin:
         try:
             return handler(settings, logger)
         except Exception as e:
-            LOGGER.exception(f"EPGeditARR: action '{action}' raised an exception")
+            LOGGER.exception(f"EPG & Sports Editor: action '{action}' raised an exception")
             return {"success": False, "message": f"Error: {e}"}
 
     # ── Actions ───────────────────────────────────────────────────────────
@@ -2393,18 +2508,6 @@ class Plugin:
         except EPGSource.DoesNotExist:
             lines.append("Fill EPG: not created — run Fill EPG")
 
-        # Unmatched channel name log — grows each time Fill/Sort/Rename finds a miss
-        try:
-            from apps.plugins.models import PluginConfig
-            cfg = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
-            unmatched_log = (cfg.settings or {}).get(UNMATCHED_LOG_KEY, []) if cfg else []
-        except Exception:
-            unmatched_log = []
-        if unmatched_log:
-            lines.append(f"\nUnmatched channel names ({len(unmatched_log)}) — copy and share to grow alias list:")
-            for name in unmatched_log:
-                lines.append(f"  {name}")
-
         return {"success": True, "message": "\n".join(lines)}
 
     def _action_test_rule(self, settings, logger):
@@ -2594,7 +2697,7 @@ class Plugin:
         # source_type="xmltv" (not "dummy") — see _sports_editor_epg_source for why.
         fill_source, created = EPGSource.objects.get_or_create(
             name=FILL_SOURCE_NAME,
-            defaults={"source_type": "xmltv", "custom_properties": {"epgeditarr_fill": True}},
+            defaults={"source_type": "xmltv", "custom_properties": {"epg_and_sports_editor_fill": True}},
         )
         if not created and fill_source.source_type != "xmltv":
             EPGSource.objects.filter(pk=fill_source.pk).update(source_type="xmltv")
@@ -2836,17 +2939,17 @@ class Plugin:
             for proc_name in ("uwsgi", "gunicorn"):
                 pid = _find_master_pid(proc_name)
                 if pid:
-                    LOGGER.info(f"EPGeditARR: sending SIGHUP to {proc_name} master PID {pid}")
+                    LOGGER.info(f"EPG & Sports Editor: sending SIGHUP to {proc_name} master PID {pid}")
                     try:
                         os.kill(pid, _signal.SIGHUP)
                         return
                     except Exception as e:
-                        LOGGER.warning(f"EPGeditARR: SIGHUP to {proc_name} PID {pid} failed ({e})")
-            LOGGER.warning("EPGeditARR: no uwsgi/gunicorn master found, falling back to PID 1")
+                        LOGGER.warning(f"EPG & Sports Editor: SIGHUP to {proc_name} PID {pid} failed ({e})")
+            LOGGER.warning("EPG & Sports Editor: no uwsgi/gunicorn master found, falling back to PID 1")
             try:
                 os.kill(1, _signal.SIGHUP)
             except Exception as e2:
-                LOGGER.error(f"EPGeditARR: restart failed: {e2}")
+                LOGGER.error(f"EPG & Sports Editor: restart failed: {e2}")
 
         threading.Thread(target=_do_restart, daemon=True).start()
         return {"success": True, "message": "Restart signal sent. Dispatcharr will reload in ~2 seconds.\n\nRefresh this page in about 15 seconds."}
