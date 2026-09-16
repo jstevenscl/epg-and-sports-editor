@@ -844,6 +844,14 @@ class Plugin:
                     "below as its own section. Enable the sources you want to "
                     "transform and add rules for each field you want to modify.\n\n"
                     + _RULE_FORMAT_HELP
+                    + "\n\nTitle Rules only:\n"
+                    "  swap_subtitle::PATTERN::\n"
+                    "Swaps Title and Sub-Title when the title matches PATTERN, before "
+                    "any other rules run (regex/replace rules below still apply "
+                    "afterward, to the swapped values). Useful when a source publishes "
+                    "a generic title (e.g. 'College Football') with the real matchup "
+                    "in the sub-title and you want them the other way around.\n"
+                    "  Example: swap_subtitle::^College Football$::"
                 ),
             }
         ]
@@ -875,8 +883,13 @@ class Plugin:
                         "label": "Title Rules",
                         "type": "text",
                         "default": "",
-                        "placeholder": "regex::S\\d+E\\d+\\s*::\nreplace::[HD]::",
-                        "help_text": "Rules applied to the program title. One per line.",
+                        "placeholder": "regex::S\\d+E\\d+\\s*::\nreplace::[HD]::\nswap_subtitle::^College Football$::",
+                        "help_text": (
+                            "Rules applied to the program title. One per line. "
+                            "Also supports swap_subtitle::PATTERN:: to swap Title and "
+                            "Sub-Title when the title matches PATTERN — see the info "
+                            "box above for details."
+                        ),
                     },
                     {
                         "id": f"src_{sid}_subtitle_rules",
@@ -1156,6 +1169,15 @@ class Plugin:
                     LOGGER.warning(f"EPG & Sports Editor: bad regex '{arg1}': {e}")
             elif kind in ("replace", "find_replace"):
                 rules.append({"type": "replace", "find": arg1, "replacement": arg2})
+            elif kind == "swap_subtitle":
+                try:
+                    rules.append({
+                        "type": "swap_subtitle",
+                        "pattern": re.compile(arg1),
+                        "raw": arg1,
+                    })
+                except re.error as e:
+                    LOGGER.warning(f"EPG & Sports Editor: bad regex '{arg1}': {e}")
             else:
                 LOGGER.warning(f"EPG & Sports Editor: unknown rule type '{kind}' — skipping")
         return rules
@@ -1166,8 +1188,10 @@ class Plugin:
         for rule in rules:
             if rule["type"] == "regex":
                 value = rule["pattern"].sub(rule["replacement"], value)
-            else:
+            elif rule["type"] == "replace":
                 value = value.replace(rule["find"], rule["replacement"])
+            # swap_subtitle needs both title and sub_title at once — handled by
+            # the caller (_do_transform_source) before per-field rules run.
         return value.strip() if value else value
 
     # ── Sports Editor ────────────────────────────────────────────────────
@@ -2063,8 +2087,10 @@ class Plugin:
                 for r in rules:
                     if r["type"] == "regex":
                         descs.append(f"regex({r['raw']!r} → {r['replacement']!r})")
-                    else:
+                    elif r["type"] == "replace":
                         descs.append(f"replace({r['find']!r} → {r['replacement']!r})")
+                    else:
+                        descs.append(f"swap_subtitle({r['raw']!r})")
                 lines.append(f"    {label}: " + ", ".join(descs))
         force_category = (settings.get(f"src_{source_id}_force_category", "") or "").strip()
         if force_category:
@@ -2235,14 +2261,26 @@ class Plugin:
                     if synth_episode_num:
                         custom_props["season"] = prog.start_time.year
                         custom_props["episode"] = prog.start_time.timetuple().tm_yday
+
+                    # swap_subtitle runs before the normal per-field rules below, so
+                    # those still get a chance to clean up the swapped values. Only
+                    # swap when there's a non-empty sub_title to swap in, otherwise
+                    # the title would go blank.
+                    title_src, subtitle_src = prog.title, prog.sub_title
+                    if prog.sub_title and prog.title and any(
+                        r["type"] == "swap_subtitle" and r["pattern"].search(prog.title)
+                        for r in field_rules["title"]
+                    ):
+                        title_src, subtitle_src = prog.sub_title, prog.title
+
                     batch.append(ProgramData(
                         epg=ve,
                         start_time=prog.start_time,
                         end_time=prog.end_time,
-                        title=self._apply_rules(prog.title, field_rules["title"]) or prog.title,
+                        title=self._apply_rules(title_src, field_rules["title"]) or title_src,
                         sub_title=(
-                            self._apply_rules(prog.sub_title, field_rules["sub_title"])
-                            if prog.sub_title is not None else None
+                            self._apply_rules(subtitle_src, field_rules["sub_title"])
+                            if subtitle_src is not None else None
                         ),
                         description=(
                             self._apply_rules(prog.description, field_rules["description"])

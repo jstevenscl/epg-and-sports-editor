@@ -203,6 +203,21 @@ replace::FIND::REPLACEMENT
 - Literal text match (not a regex)
 - Leave `REPLACEMENT` empty to strip the match
 
+### Swap title/sub-title rule (Title Rules only)
+```
+swap_subtitle::PATTERN::
+```
+- `PATTERN` is a Python regex matched against the program title
+- When it matches, the program's Title and Sub-Title are swapped before any other rules run — so regex/replace rules below it still apply, to the swapped values
+- Only valid in **Title Rules**; a plain `regex::`/`replace::` rule can't see across fields, so this is the way to move text between Title and Sub-Title
+- The swap is skipped if Sub-Title is empty, so Title never goes blank
+
+Useful when a source publishes a generic title (e.g. `College Football`) with the actual matchup in the sub-title, and you want them the other way around:
+```
+swap_subtitle::^College Football$::
+```
+Turns `Title: College Football` / `Sub-Title: Ohio State at Michigan` into `Title: Ohio State at Michigan` / `Sub-Title: College Football`.
+
 ### Examples
 
 Strip episode codes from titles:
@@ -261,7 +276,7 @@ Each EPG source in Dispatcharr gets its own section. Per-source settings:
 | Setting | Description |
 |---|---|
 | **Enable transformation** | Toggle transformation on/off for this source |
-| **Title Rules** | Rules applied to program titles |
+| **Title Rules** | Rules applied to program titles. Also the only field that accepts `swap_subtitle::PATTERN::` to swap Title and Sub-Title — see Rule Format above. |
 | **Sub-Title Rules** | Rules applied to episode sub-titles |
 | **Description Rules** | Rules applied to program descriptions |
 | **Force Category (Series Mode)** | Adds an XMLTV `<category>` tag to every program on this source's virtual copy. Setting this to `Series` tells Plex to treat repeating programs that share a title as episodes of a show instead of duplicate movies, so DVR can record more than one. Comma-separated for multiple categories. Leave blank to disable. |
