@@ -14,7 +14,7 @@ from django.db import transaction
 
 LOGGER = logging.getLogger("plugins.epg-and-sports-editor")
 VIRTUAL_PREFIX = "EPG & Sports Editor: "
-PLUGIN_KEY = "epg-and-sports-editor"
+PLUGIN_KEY = "epg_and_sports_editor"
 
 # Pre-rename identifiers (this plugin shipped as "EPGeditARR"/"epgeditarr" through
 # v0.3.03) — kept around solely so _migrate_from_legacy_key() can find and carry
