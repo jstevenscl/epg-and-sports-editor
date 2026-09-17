@@ -373,6 +373,9 @@ These are provider-specific — not all EPG sources include them. Use Sample Dat
 **I updated Dispatcharr and now plugin action buttons don't show any output.**
 This is a known display-only regression, present since Dispatcharr v0.25.0 and still occurring as of v0.29.0. When you click an action button (Status, Fill, Run Sport Templates, etc.) the action runs correctly on the backend and all data is written — the result text just doesn't render in the modal UI. To confirm an action completed, click **Show Status** which will show current program counts and source state. All functionality continues to work normally. No change to EPG & Sports Editor is needed.
 
+**My renamed channels / Sports Editor changes revert every time the M3U or EPG refreshes.**
+Fixed in v0.4.02. Versions 0.4.00–0.4.01 had a bug where the plugin's internal settings lookup used the wrong key format, so its post-refresh hooks silently did nothing after every M3U/EPG refresh (manual **Run Sport Templates Now**/**Apply Now** still worked, since those don't depend on the broken lookup). Update to 0.4.02 or later — no settings changes needed.
+
 **Where did SiriusXM channel management go?**
 It's been removed from EPG & Sports Editor as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Ticker](https://github.com/jstevenscl/ticker) plugin.
 
