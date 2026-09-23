@@ -376,6 +376,9 @@ This is a known display-only regression, present since Dispatcharr v0.25.0 and s
 **My renamed channels / Sports Editor changes revert every time the M3U or EPG refreshes.**
 Fixed in v0.4.02. Versions 0.4.00–0.4.01 had a bug where the plugin's internal settings lookup used the wrong key format, so its post-refresh hooks silently did nothing after every M3U/EPG refresh (manual **Run Sport Templates Now**/**Apply Now** still worked, since those don't depend on the broken lookup). Update to 0.4.02 or later — no settings changes needed.
 
+**I get a "failed to update plugin settings: 400" error when I click an action button, even though the action itself works.**
+Fixed in v0.4.03. Versions through 0.4.02 cached the fetched Sport Templates schedule data inside the plugin's own settings, which Dispatcharr's plugin UI silently re-uploads in full every time you click any action button. Once that cache grew large enough, the re-upload could be rejected, producing this error — even though the action you clicked ran and completed normally. Update to 0.4.03 or later; the schedule cache no longer lives in your settings, and any existing bloat is cleaned up automatically the next time the plugin loads. No settings changes needed.
+
 **Where did SiriusXM channel management go?**
 It's been removed from EPG & Sports Editor as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Ticker](https://github.com/jstevenscl/ticker) plugin.
 

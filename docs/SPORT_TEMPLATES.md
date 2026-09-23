@@ -345,6 +345,9 @@ Click **Run Sport Templates Now** — it always regenerates all three blocks fre
 **Clicking the refresh icon (⟳) next to "EPG & Sports Editor: Sports Editor" in M3U & EPG Manager gives an error about the source URL.**
 Expected — see the note in [Step 4](#step-4--run-it) above. That row intentionally has no URL. Use **Run Sport Templates Now** in the plugin's Actions tab instead; your real EPG data was never affected.
 
+**I get a "failed to update plugin settings: 400" error when running Sport Templates actions.**
+Fixed in v0.4.03 — see the README FAQ. The action itself still completed and your data was written; update the plugin to clear the spurious error.
+
 ---
 
 ## Credits
