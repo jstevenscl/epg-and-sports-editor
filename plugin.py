@@ -34,9 +34,17 @@ FILL_CACHE_TTL_DAYS = 7
 
 SDP_SCHEDULE_URL = "https://api.tickarr.com/v1/schedule.json"
 SPORTS_EPG_SOURCE_NAME = "EPG & Sports Editor: Sports Editor"
-SDP_CACHE_KEY = "sdp_schedule_cache"
-SDP_CACHE_UPDATED_KEY = "sdp_schedule_cache_updated"
+# Django cache key (Redis-backed in Dispatcharr) — deliberately NOT stored in
+# PluginConfig.settings. Dispatcharr's plugin UI round-trips the WHOLE current
+# settings blob on every Save/Run click (silently, before running the action),
+# and this schedule payload (4-6MB+ for the full multi-league feed) was getting
+# uselessly re-uploaded on every click — large enough to trip a body-size limit
+# in some deployments (reverse proxy or WSGI layer) and surface as a "failed to
+# update settings: 400" error even though the action itself completes fine.
+SDP_CACHE_KEY = "epg_and_sports_editor:sdp_schedule_cache"
 SDP_CACHE_TTL_SECS = 30 * 60
+# How long a stale cache entry stays available as a fetch-failure fallback.
+SDP_CACHE_STALE_TTL_SECS = 24 * 60 * 60
 
 _MATCHUP_SEP_RE = re.compile(r"\s+(?:@|vs\.?|v\.?|at)\s+", re.IGNORECASE)
 
@@ -438,6 +446,7 @@ class Plugin:
             if not new_cfg:
                 return
             new_settings = dict(new_cfg.settings or {})
+            settings_dirty = False
             if not new_settings.get("_migrated_from_epgeditarr"):
                 old_cfg = PluginConfig.objects.filter(key=_LEGACY_PLUGIN_KEY).first()
                 if old_cfg and old_cfg.settings and not new_settings:
@@ -447,6 +456,19 @@ class Plugin:
                         "legacy 'epgeditarr' plugin install"
                     )
                 new_settings["_migrated_from_epgeditarr"] = True
+                settings_dirty = True
+
+            # One-time cleanup for installs upgrading from a version that cached the
+            # fetched SDP schedule inside PluginConfig.settings (moved to Django's
+            # cache framework — see SDP_CACHE_KEY). That multi-MB blob was getting
+            # echoed back on every settings Save/Run round-trip from the plugin UI
+            # (see SDP_CACHE_KEY comment). Strip it out of already-affected installs.
+            for legacy_key in ("sdp_schedule_cache", "sdp_schedule_cache_updated"):
+                if legacy_key in new_settings:
+                    del new_settings[legacy_key]
+                    settings_dirty = True
+
+            if settings_dirty:
                 new_cfg.settings = new_settings
                 new_cfg.save(update_fields=["settings"])
 
@@ -1284,39 +1306,20 @@ class Plugin:
 
     # ── Sports Editor: SDP schedule matching + EPG generation ──────────────
 
-    def _save_plugin_setting(self, key, value):
-        """Persist a single key into this plugin's PluginConfig.settings blob,
-        independent of whatever `settings` dict a caller happens to hold — used
-        for cache state (e.g. the fetched SDP schedule) that must survive across
-        separate signal/action invocations."""
-        try:
-            from apps.plugins.models import PluginConfig
-            cfg = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
-            if not cfg:
-                return
-            data = dict(cfg.settings or {})
-            data[key] = value
-            cfg.settings = data
-            cfg.save(update_fields=["settings"])
-        except Exception as e:
-            LOGGER.debug(f"EPG & Sports Editor: could not save plugin setting '{key}': {e}")
-
     def _fetch_sdp_schedule(self, settings):
         """Fetch the public sports-data-platform schedule feed (api.tickarr.com),
-        cached ~30 min in PluginConfig.settings so every M3U refresh doesn't
-        re-fetch it. Falls back to a stale cache on fetch failure."""
+        cached ~30 min in Django's cache framework (Redis-backed in Dispatcharr,
+        shared across worker processes) so every M3U refresh doesn't re-fetch it.
+        Falls back to a stale cache (up to SDP_CACHE_STALE_TTL_SECS old) on fetch
+        failure.
+
+        Deliberately not stored in PluginConfig.settings — see SDP_CACHE_KEY."""
         import time
+        from django.core.cache import cache
 
-        cfg_settings = {}
-        try:
-            from apps.plugins.models import PluginConfig
-            cfg = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
-            cfg_settings = cfg.settings or {} if cfg else {}
-        except Exception:
-            pass
-
-        cached = cfg_settings.get(SDP_CACHE_KEY)
-        updated = cfg_settings.get(SDP_CACHE_UPDATED_KEY, 0) or 0
+        cache_entry = cache.get(SDP_CACHE_KEY) or {}
+        cached = cache_entry.get("events")
+        updated = cache_entry.get("updated", 0) or 0
         now = time.time()
         if cached and (now - updated) < SDP_CACHE_TTL_SECS:
             return self._inherit_tournament_names(cached)
@@ -1330,8 +1333,7 @@ class Plugin:
             LOGGER.warning(f"EPG & Sports Editor: SDP schedule fetch failed, using cache if available: {e}")
             return self._inherit_tournament_names(cached or [])
 
-        self._save_plugin_setting(SDP_CACHE_KEY, events)
-        self._save_plugin_setting(SDP_CACHE_UPDATED_KEY, now)
+        cache.set(SDP_CACHE_KEY, {"events": events, "updated": now}, timeout=SDP_CACHE_STALE_TTL_SECS)
         return self._inherit_tournament_names(events)
 
     @staticmethod
