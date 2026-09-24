@@ -1927,14 +1927,6 @@ class Plugin:
             ch.name = new_name
             ch.save(update_fields=["name"])
 
-        logo_url_tpl = settings.get(f"sport_tpl_{sport_slug}_logo_url") or ""
-        logo_url = self._render_sports_template(logo_url_tpl, vars_base)
-        if logo_url:
-            logo_obj, _ = Logo.objects.get_or_create(url=logo_url, defaults={"name": ch.name})
-            if ch.logo_id != logo_obj.id:
-                ch.logo = logo_obj
-                ch.save(update_fields=["logo"])
-
         tvg_id = f"epg-and-sports-editor-sports-{ch.id}"
         epg_entry, _ = EPGData.objects.get_or_create(
             tvg_id=tvg_id, epg_source=epg_source, defaults={"name": ch.name, "icon_url": ""},
@@ -1974,6 +1966,21 @@ class Plugin:
                 tvg_id=tvg_id, custom_properties={},
             ))
         ProgramData.objects.bulk_create(batch)
+
+        # Logo is deliberately the LAST step, so nothing else in this pass can
+        # override it, and it's written with a direct UPDATE (no full-model save,
+        # no signals). Falls back to the sport's default template like every other
+        # template: the automatic (signal) path reads raw PluginConfig.settings,
+        # which lacks any field the user never saved, so a bare "" default left the
+        # stream's own logo in place until the manual action (which receives
+        # defaults-merged settings) ran.
+        logo_url_tpl = settings.get(f"sport_tpl_{sport_slug}_logo_url") or defaults["logo_url"]
+        logo_url = self._render_sports_template(logo_url_tpl, vars_base)
+        if logo_url:
+            logo_obj, _ = Logo.objects.get_or_create(url=logo_url, defaults={"name": ch.name})
+            if ch.logo_id != logo_obj.id:
+                type(ch).objects.filter(pk=ch.pk).update(logo=logo_obj)
+                ch.logo = logo_obj
         return True
 
     def _run_sports_editor_epg(self, m3u_account, settings):
