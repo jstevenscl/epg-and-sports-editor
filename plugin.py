@@ -9,12 +9,44 @@ a Sports Editor that matches auto-synced channels against live schedule data.
 """
 
 import logging
+import os
 import re
 from django.db import transaction
 
 LOGGER = logging.getLogger("plugins.epg-and-sports-editor")
 VIRTUAL_PREFIX = "EPG & Sports Editor: "
 PLUGIN_KEY = "epg_and_sports_editor"
+
+
+def _candidate_plugin_keys():
+    """Every PluginConfig.key this install could be stored under, best guess first.
+
+    Dispatcharr keys a plugin by its FOLDER name (folder.replace(" ", "_").lower()),
+    hyphens preserved — so a registry install lands as "epg_and_sports_editor" but
+    a manual copy into "epg-and-sports-editor" is keyed with hyphens. Guessing one
+    constant has broken this twice (v0.4.00 rename, then a hyphen-folder install
+    where the M3U/EPG post-refresh signals silently found no settings). Derive the
+    key the same way the loader does, and keep both known spellings as fallbacks."""
+    folder = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
+    keys = []
+    for k in (folder.replace(" ", "_").lower(), PLUGIN_KEY, PLUGIN_KEY.replace("_", "-")):
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+
+def _find_plugin_config(enabled_only=False):
+    """This plugin's PluginConfig row, whichever key spelling the install used."""
+    from apps.plugins.models import PluginConfig
+    qs = PluginConfig.objects.filter(key__in=_candidate_plugin_keys())
+    if enabled_only:
+        qs = qs.filter(enabled=True)
+    rows = {c.key: c for c in qs}
+    for k in _candidate_plugin_keys():
+        if k in rows:
+            return rows[k]
+    return None
+
 
 # Pre-rename identifiers (this plugin shipped as "EPGeditARR"/"epgeditarr" through
 # v0.3.03) — kept around solely so _migrate_from_legacy_key() can find and carry
@@ -442,7 +474,7 @@ class Plugin:
         install that never had the old "epgeditarr" key."""
         try:
             from apps.plugins.models import PluginConfig
-            new_cfg = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
+            new_cfg = _find_plugin_config()
             if not new_cfg:
                 return
             new_settings = dict(new_cfg.settings or {})
@@ -614,8 +646,19 @@ class Plugin:
             # M3U/XC providers (often 1000+), most with zero actual channels assigned.
             # Only show groups that have at least one real Channel — that's the set a
             # user could plausibly want Sports Editor rules for.
-            group_ids_with_channels = Channel.objects.values_list("channel_group_id", flat=True).distinct()
-            groups = list(ChannelGroup.objects.filter(id__in=group_ids_with_channels).order_by("name"))
+            group_ids = set(Channel.objects.values_list("channel_group_id", flat=True).distinct())
+            # Also list groups that have Auto Channel Sync switched on but haven't
+            # produced their first channels yet — otherwise a brand-new group can't
+            # be configured until AFTER its first (unprocessed) refresh.
+            try:
+                from apps.channels.models import ChannelGroupM3UAccount
+                group_ids |= set(
+                    ChannelGroupM3UAccount.objects.filter(auto_channel_sync=True)
+                    .values_list("channel_group_id", flat=True)
+                )
+            except Exception as e:
+                LOGGER.debug(f"EPG & Sports Editor: could not read auto-sync groups: {e}")
+            groups = list(ChannelGroup.objects.filter(id__in=group_ids).order_by("name"))
         except Exception as e:
             LOGGER.debug(f"EPG & Sports Editor: could not load channel groups for field generation: {e}")
 
@@ -1066,9 +1109,12 @@ class Plugin:
             if not status_saved or instance.status != "success":
                 return
             try:
-                from apps.plugins.models import PluginConfig
-                cfg = PluginConfig.objects.filter(key=PLUGIN_KEY, enabled=True).first()
+                cfg = _find_plugin_config(enabled_only=True)
                 if not cfg:
+                    LOGGER.warning(
+                        "EPG & Sports Editor: no enabled plugin settings found under keys "
+                        f"{_candidate_plugin_keys()} — post-refresh processing skipped"
+                    )
                     return
                 settings = cfg.settings
             except Exception as e:
@@ -1117,9 +1163,12 @@ class Plugin:
             if not status_saved or instance.status != "success":
                 return
             try:
-                from apps.plugins.models import PluginConfig
-                cfg = PluginConfig.objects.filter(key=PLUGIN_KEY, enabled=True).first()
+                cfg = _find_plugin_config(enabled_only=True)
                 if not cfg:
+                    LOGGER.warning(
+                        "EPG & Sports Editor: no enabled plugin settings found under keys "
+                        f"{_candidate_plugin_keys()} — post-refresh processing skipped"
+                    )
                     return
                 settings = cfg.settings
             except Exception as e:
@@ -1453,7 +1502,7 @@ class Plugin:
         window_start = now - timedelta(hours=20)
         window_end = now + timedelta(days=10)
 
-        best_event, best_score = None, 0.0
+        best_event, best_rank = None, None
         for ev in events:
             if ev.get("league_slug") != league_slug:
                 continue
@@ -1480,10 +1529,24 @@ class Plugin:
             # Require BOTH sides to independently match well — averaging let one
             # strong match mask a completely wrong other team, so use the weaker
             # of the two rather than the mean.
-            if combined > best_score:
-                best_score, best_event = combined, ev
+            #
+            # Score ties are common: SDP carries a second "espn_watch" row per game
+            # (broadcast info, no team abbreviations) whose away/home order is the
+            # REVERSE of the real fixture in nearly every case, so a full-team-name
+            # channel scores 1.0 against both rows and first-in-feed-order used to
+            # win — occasionally producing "Home @ Away" names/logos. Break ties in
+            # favor of the complete main row, then the row whose orientation matches
+            # the channel's own away/home order.
+            complete = bool(ev.get("away_team_abbr") and ev.get("home_team_abbr")
+                            and ev.get("ingest_source") != "espn_watch")
+            # Last resort (same teams meet twice in the window, e.g. a home-and-home):
+            # prefer the fixture closest to now — a channel is far more likely to
+            # be for the game happening around now than one days away.
+            rank = (combined, complete, direct >= swapped, -abs((start - now).total_seconds()))
+            if best_rank is None or rank > best_rank:
+                best_rank, best_event = rank, ev
 
-        return best_event if best_score >= 0.6 else None
+        return best_event if best_rank is not None and best_rank[0] >= 0.6 else None
 
     # ── Single-title matching (golf, NASCAR) ────────────────────────────────
     # No away/home split exists for these — SDP puts one descriptive broadcast-

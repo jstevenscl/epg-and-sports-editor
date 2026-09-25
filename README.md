@@ -382,6 +382,15 @@ Fixed in v0.4.03. Versions through 0.4.02 cached the fetched Sport Templates sch
 **Channels get renamed and get EPG automatically after a refresh, but the matchup logos only appear after I click Run Sport Templates Now.**
 Fixed in v0.4.05. The automatic post-refresh run had no fallback for the Logo URL template, so if you had never saved that field for a sport, no logo was assigned and the channel kept the stream's own logo — while the manual button (which supplies the built-in default) worked. The logo is now assigned from the sport's default template when you haven't customized it, and it's applied as the very last step of matching. No settings changes needed. (Note: leaving a Logo URL field blank now means "use the default", not "no logo".)
 
+**Sports Editor / Sport Templates never run automatically after a refresh — only the manual buttons work.**
+Fixed in v0.4.06. The post-refresh hooks looked up the plugin's saved settings under a single hard-coded key (`epg_and_sports_editor`), but Dispatcharr keys a plugin by its install *folder name* — so a manual install into a hyphenated folder (`epg-and-sports-editor`) silently found no settings and skipped everything. The plugin now derives its key from its own folder (and still accepts both spellings), and logs a warning if it can't find its settings. No settings changes needed.
+
+**Some matched games show the teams backwards ("Home @ Away") or the wrong day's game in a series.**
+Fixed in v0.4.06. The schedule feed carries a second broadcast-only row per game whose away/home order is usually reversed; when a channel name matched both rows equally, either could win. Matching now prefers the complete main row, then the row whose away/home order matches the channel name, then the game closest to now (so a series matches the upcoming game instead of one that already finished).
+
+**A brand-new channel group doesn't appear in the Sports Editor settings until it already has channels.**
+Improved in v0.4.06: groups with Auto Channel Sync enabled are now listed even before their first channels exist. Dispatcharr builds the settings form when the plugin loads, so use the plugins **Restart Dispatcharr**/reload after enabling Auto Channel Sync on a new group for it to show up.
+
 **Where did SiriusXM channel management go?**
 It's been removed from EPG & Sports Editor as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Ticker](https://github.com/jstevenscl/ticker) plugin.
 
