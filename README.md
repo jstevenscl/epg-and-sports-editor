@@ -414,6 +414,18 @@ Fixed in v0.4.07. Team matching used to accept any 60%-similar text, so words li
 **The Sports Editor EPG source shows "error — Failed to download EPG data" but my guide is fine.**
 Fixed in v0.4.07. Linking a channel to the plugin's generated EPG made Dispatcharr queue a file-parsing job that can't succeed for a source with no file, and it stamped the source with an error. The plugin now links channels without triggering that job, and also clears Dispatcharr's cached guide output after writing programs (previously the XMLTV guide could keep serving old titles after a program change).
 
+**College football channels named `SC State`, `Southeastern Louisiana` or `Grambling State` don't match, though the game is on ESPN.**
+Fixed in v0.4.08. Providers and ESPN spell the same school differently (`Southeastern Louisiana` vs ESPN's `SE Louisiana`, `SC State` vs `South Carolina State`, `Grambling State` vs `Grambling`, `Penn` vs `Pennsylvania`). Matching now includes a general alias step — common short/long forms (`SE`/`Southeastern`, `SC`/`South Carolina`, `St`/`State`/`Saint`, `Penn`/`Pennsylvania`, `UMass`, `Pitt`, …) and an optional trailing "State" — scored just below a real name match, so a genuine match always wins. An alias is only accepted when the other team in the game is a real match, and never when a real team with that name plays in the same window (so `Colorado State` is not aliased onto `Colorado` while a real Colorado State game exists). One-word, four-letter-or-shorter feed names such as `IOWA` or `OHIO` now match by equality only (`Northern Iowa` no longer matches `IOWA`).
+
+**College football games matched but show no logo.**
+Fixed in v0.4.08. game-thumbs doesn't recognize some of ESPN's team abbreviations (e.g. `MTSU`, `JVST`, `AFA`, `NEV` return HTTP 400 "Team not found") but does recognize full team names, so for `NCAAF` / `NCAA Football` the default Logo URL now uses each team's full-name slug. Other leagues keep using the abbreviation. A few very small schools (e.g. Rio Grande) aren't in game-thumbs at all and can't get a logo.
+
+**A game that only exists in the ESPN+ watch feed was named backwards ("Home @ Away").**
+Fixed in v0.4.08. For US leagues the watch feed lists home and away in the opposite order of the real scoreboard (college football 61 of 61 games, NHL 35 of 37 — but not soccer). The plugin now measures this per league from the feed itself and corrects the reversed leagues, so a watch-only game comes out in the provider's own order.
+
+**Small-school (FCS and below) college games were missing from the schedule.**
+Until 2026-09-26 the schedule feed only carried the top college division (FBS), so FCS-vs-FCS games such as Harvard–Brown or Yale–Cornell had nothing to match. The feed now includes the FCS; if you still see a game missing, check that your plugin is v0.4.08 or later and that the channel's team names match ESPN's (the alias step above covers the common spelling differences).
+
 **Where did SiriusXM channel management go?**
 It's been removed from EPG & Sports Editor as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Ticker](https://github.com/jstevenscl/ticker) plugin.
 

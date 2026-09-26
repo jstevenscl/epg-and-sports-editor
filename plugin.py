@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import unicodedata
+from functools import lru_cache
 from django.db import transaction
 
 LOGGER = logging.getLogger("plugins.epg-and-sports-editor")
@@ -473,6 +474,78 @@ _SPORT_SLUG_POOL = {
     "ncaa-football": ("ncaa-football", "ncaaf"),
     "ncaaf": ("ncaaf", "ncaa-football"),
 }
+# Leagues whose logo URL should be built from the full team-name slug instead of the
+# feed's abbreviation (see _build_sdp_template_vars).
+_LOGO_NAME_SLUG_LEAGUES = {"ncaaf", "ncaa-football"}
+
+# The schedule feed's ESPN+ "watch" rows (ingest_source "espn_watch") list away/home in the
+# REVERSE order of the real scoreboard row for US leagues (measured against the same games:
+# ncaa-football 61/61 reversed, nhl 35/37) but not for soccer (laliga/usl/eredivisie all
+# same). For a game that only exists as a watch row that produced "Home @ Away" names and
+# logos. Leagues are detected from the feed itself (enough paired rows, mostly reversed);
+# this fixed set is the fallback when a league has too few pairs to measure.
+_WATCH_ROWS_REVERSED_FALLBACK = {"nhl", "ncaa-football"}
+_WATCH_SWAP_FIELDS = ("team_name", "team_abbr", "team_short_name", "team_id", "team_logo_url", "record", "score")
+
+# Providers and ESPN spell the same school differently ("Southeastern Louisiana" vs "SE
+# Louisiana", "SC State" vs "South Carolina State", "Penn" vs "Pennsylvania", "Grambling
+# State" vs "Grambling"). Two-way token aliases: any token below may be swapped for its
+# partner(s) when comparing team text. Alias matches score 0.8 — lower than a real
+# prefix/suffix match (0.85) — so a genuine name match always outranks an alias one.
+_TEAM_TOKEN_ALIAS_PAIRS = [
+    ("southeastern", "se"), ("southwestern", "sw"), ("northeastern", "ne"), ("northwestern", "nw"),
+    ("southeast", "se"), ("southwest", "sw"),
+    ("sc", "south carolina"), ("nc", "north carolina"), ("nd", "north dakota"), ("sd", "south dakota"),
+    ("wv", "west virginia"), ("penn", "pennsylvania"), ("pitt", "pittsburgh"), ("cal", "california"),
+    ("umass", "massachusetts"), ("uconn", "connecticut"), ("miss", "mississippi"),
+    ("tenn", "tennessee"), ("fla", "florida"), ("ga", "georgia"), ("ala", "alabama"), ("ky", "kentucky"),
+    ("st", "state"), ("st", "saint"), ("univ", "university"), ("intl", "international"),
+    ("central", "cent"), ("eastern", "east"), ("western", "west"), ("southern", "south"), ("northern", "north"),
+]
+_TEAM_TOKEN_ALIASES = {}
+for _a, _b in _TEAM_TOKEN_ALIAS_PAIRS:
+    _TEAM_TOKEN_ALIASES.setdefault(tuple(_a.split()), []).append(tuple(_b.split()))
+    _TEAM_TOKEN_ALIASES.setdefault(tuple(_b.split()), []).append(tuple(_a.split()))
+_TEAM_ALIAS_MAX_VARIANTS = 24
+
+
+@lru_cache(maxsize=16384)
+def _team_tokens(value):
+    """Lower-cased, accent-stripped word tuple ("St. Louis" -> ("st", "louis"))."""
+    v = unicodedata.normalize("NFKD", (value or "").lower())
+    v = "".join(ch for ch in v if not unicodedata.combining(ch))
+    tokens = re.findall(r"[a-z0-9]+", v)
+    if len(tokens) > 1 and tokens[-1] == "st":
+        tokens[-1] = "state"        # "Utah St." / "Ohio St." are the State schools (a leading "St." stays)
+    return tuple(tokens)
+
+
+@lru_cache(maxsize=4096)
+def _alias_variants(tokens):
+    """Alias spellings of a word tuple: up to two token substitutions from
+    _TEAM_TOKEN_ALIASES, and the name with a trailing "State" dropped
+    ("Grambling State" -> "Grambling"). Cached — the same channel text is scored
+    against every event in the window."""
+    out, seen = [], {tokens}
+    frontier = [tokens]
+    for _ in range(2):
+        nxt = []
+        for seq in frontier:
+            for size in (2, 1):
+                for i in range(len(seq) - size + 1):
+                    for alt in _TEAM_TOKEN_ALIASES.get(seq[i:i + size], ()):
+                        v = seq[:i] + alt + seq[i + size:]
+                        if v not in seen:
+                            seen.add(v)
+                            out.append(v)
+                            nxt.append(v)
+            if len(seq) > 1 and seq[-1] == "state" and seq[:-1] not in seen:
+                seen.add(seq[:-1])
+                out.append(seq[:-1])
+        frontier = nxt
+        if len(out) >= _TEAM_ALIAS_MAX_VARIANTS:
+            break
+    return tuple(out[:_TEAM_ALIAS_MAX_VARIANTS])
 
 # ── Per-side matchup cleanup ────────────────────────────────────────────────
 # Provider names wrap the real team text in feed tags and times, e.g.
@@ -500,7 +573,7 @@ _MATCHUP_LEAD_RES = [
 _MATCHUP_RANK_RE = re.compile(r"^\s*(?:#\d{1,2}|\(\d{1,2}\)|No\.\s*\d{1,2})\s+", re.IGNORECASE)
 _MATCHUP_TRAIL_RES = [
     re.compile(                                                                      # "(Spanish)" "(NHLN Feed )" "(2026-09-26 19:25)"
-        r"\s*\((?=[^)]*(?:\d|feed|spanish|french|english|portuguese|\bhd\b|\balt\b|espn|arena|cast|home|away|national))[^)]*\)\s*$",
+        r"\s*\((?=[^)]*(?:\d|feed|spanish|french|english|portuguese|\bhd\b|\balt\b|espn|arena|cast|home|away|national|\bfox\b|\babc\b|\bcbs\b|\bnbc\b|sports|network|peacock|prime|\btnt\b|\btbs\b))[^)]*\)\s*$",
         re.IGNORECASE,
     ),
     re.compile(r"\s*@\s*\d{1,2}(?::\d{2})?\s*[AaPp][Mm].*$"),                       # "@7:00 pm"
@@ -532,6 +605,13 @@ def _clean_matchup_side(text, side):
                     s = s2
             if s == before:
                 break
+        # Broadcast/segment decoration ending in a colon ("FOX College Football - Big 12:
+        # TCU"): real team names never contain a colon, so everything up to the last
+        # ": " is decoration. (A time like "7:30PM" has no space after its colon.)
+        if ": " in s:
+            tail = s.rsplit(": ", 1)[1].strip()
+            if tail:
+                s = tail
     else:
         for _ in range(3):
             before = s
@@ -1604,7 +1684,7 @@ class Plugin:
         updated = cache_entry.get("updated", 0) or 0
         now = time.time()
         if cached and (now - updated) < SDP_CACHE_TTL_SECS:
-            return self._inherit_tournament_names(cached)
+            return self._prepare_sdp_events(cached)
 
         try:
             import requests
@@ -1613,10 +1693,72 @@ class Plugin:
             events = resp.json().get("events", [])
         except Exception as e:
             LOGGER.warning(f"EPG & Sports Editor: SDP schedule fetch failed, using cache if available: {e}")
-            return self._inherit_tournament_names(cached or [])
+            return self._prepare_sdp_events(cached or [])
 
         cache.set(SDP_CACHE_KEY, {"events": events, "updated": now}, timeout=SDP_CACHE_STALE_TTL_SECS)
-        return self._inherit_tournament_names(events)
+        return self._prepare_sdp_events(events)
+
+    @staticmethod
+    def _normalize_watch_orientation(events):
+        """Swap away/home on espn_watch rows for leagues whose watch rows are measurably
+        reversed vs the real scoreboard rows (see _WATCH_ROWS_REVERSED_FALLBACK)."""
+        import re
+        from datetime import datetime
+
+        def key(name):
+            return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
+
+        def when(ev):
+            try:
+                return datetime.fromisoformat((ev.get("start_time_utc") or "").replace("Z", "+00:00"))
+            except ValueError:
+                return None
+
+        main_by_pair = {}
+        for ev in events:
+            if ev.get("ingest_source") == "espn_watch" or not ev.get("away_team_name") or not ev.get("home_team_name"):
+                continue
+            t = when(ev)
+            if t is not None:
+                main_by_pair.setdefault((key(ev["away_team_name"]), key(ev["home_team_name"])), []).append(t)
+
+        def has_main(away_key, home_key, t):
+            return any(abs((m - t).total_seconds()) <= 10 * 3600 for m in main_by_pair.get((away_key, home_key), ()))
+
+        votes = {}
+        for ev in events:
+            if ev.get("ingest_source") != "espn_watch" or not ev.get("away_team_name") or not ev.get("home_team_name"):
+                continue
+            t = when(ev)
+            if t is None:
+                continue
+            a, h = key(ev["away_team_name"]), key(ev["home_team_name"])
+            league = votes.setdefault(ev.get("league_slug"), [0, 0])
+            if has_main(h, a, t):
+                league[0] += 1          # a main row has the same game with the teams swapped -> watch row reversed
+            elif has_main(a, h, t):
+                league[1] += 1          # same orientation
+        reversed_leagues = set()
+        for league, (rev, same) in votes.items():
+            if rev + same >= 3:
+                if rev >= 3 * max(same, 1) or (same == 0 and rev >= 3):
+                    reversed_leagues.add(league)
+                elif same >= rev:
+                    continue
+            elif league in _WATCH_ROWS_REVERSED_FALLBACK:
+                reversed_leagues.add(league)
+        reversed_leagues |= {lg for lg in _WATCH_ROWS_REVERSED_FALLBACK if lg not in votes or votes[lg][0] + votes[lg][1] < 3}
+        for ev in events:
+            if (ev.get("ingest_source") == "espn_watch" and ev.get("league_slug") in reversed_leagues
+                    and ev.get("away_team_name") and ev.get("home_team_name")):
+                for field in _WATCH_SWAP_FIELDS:
+                    a_key, h_key = "away_" + field, "home_" + field
+                    if a_key in ev or h_key in ev:
+                        ev[a_key], ev[h_key] = ev.get(h_key), ev.get(a_key)
+        return events
+
+    def _prepare_sdp_events(self, events):
+        return self._normalize_watch_orientation(self._inherit_tournament_names(events))
 
     @staticmethod
     def _inherit_tournament_names(events):
@@ -1697,41 +1839,64 @@ class Plugin:
         Whole-WORD comparison, accent- and punctuation-insensitive ("Montréal" ==
         "Montreal", "D.C." == "DC", "St. Louis" == "St Louis"):
           1.0   identical word sequence
-          0.85  one side is a whole-word prefix or suffix of the other
-                ("Tennessee" -> "Tennessee Volunteers", "Vancouver" -> "Vancouver
-                Whitecaps", "Everton FC" -> "Everton") — but NOT a word in the middle
-                ("Tennessee" must not match "Middle Tennessee Blue Raiders")
-          else  fuzzy similarity, only when it's a near-identical spelling (>= 0.85)
-        The old scoring accepted 0.6 raw character similarity, which happily matched
-        "Kennesaw State" to "Jacksonville State" and the abbreviations NYR/NYI —
-        renaming a channel to the wrong game."""
+          0.85  the channel text is a whole-word prefix/suffix of the team name
+                ("Tennessee" -> "Tennessee Volunteers", "Colorado State" -> "Colorado
+                State Rams") — but NOT a word in the middle ("Tennessee" must not match
+                "Middle Tennessee Blue Raiders")
+          0.82  the team name is a whole-word prefix/suffix of the channel text
+                ("Golden State Warriors" -> "Warriors", "Everton FC" -> "Everton") — the
+                text has EXTRA words, so it could be a different, longer name
+                ("Southeastern Louisiana" is not "Louisiana")
+          0.80  only via an alias spelling (see _TEAM_TOKEN_ALIAS_PAIRS)
+          else  fuzzy similarity, only for a near-identical spelling (>= 0.9, names of 8+ letters)
+        One-word candidates of <= 4 letters are abbreviations (IOWA, OHIO) and match by
+        equality only. The old scoring accepted 0.6 raw character similarity, which
+        matched "Kennesaw State" to "Jacksonville State" and NYR to NYI."""
         import difflib
 
-        def _tokens(value):
-            v = unicodedata.normalize("NFKD", (value or "").lower())
-            v = "".join(ch for ch in v if not unicodedata.combining(ch))
-            return re.findall(r"[a-z0-9]+", v)
-
-        t = _tokens(text)
+        t = _team_tokens(text)
         if not t:
             return 0.0
         t_compact = "".join(t)
+        cands = [(c, "".join(c)) for c in (_team_tokens(x) for x in candidates) if c]
         best = 0.0
-        for cand in candidates:
-            c = _tokens(cand)
-            if not c:
-                continue
-            c_compact = "".join(c)
+        for c, c_compact in cands:
             if t == c or t_compact == c_compact:
                 return 1.0
+            if len(c) == 1 and len(c_compact) <= 4 and len(t) > 1:
+                continue
             short, long_ = (t, c) if len(t) <= len(c) else (c, t)
             if (len("".join(short)) >= 3 and len(short) < len(long_)
                     and (long_[:len(short)] == short or long_[-len(short):] == short)):
-                best = max(best, 0.85)
+                best = max(best, 0.85 if len(t) < len(c) else 0.82)
                 continue
-            ratio = difflib.SequenceMatcher(None, t_compact, c_compact).ratio()
-            if ratio >= 0.85:
-                best = max(best, ratio)
+            sm = difflib.SequenceMatcher(None, t_compact, c_compact)
+            # real_quick_ratio/quick_ratio are cheap upper bounds on ratio(): most
+            # unrelated names fail them, so the expensive comparison rarely runs.
+            # Near-identical SPELLING only (a typo), not one-letter-different names:
+            # "SC State" vs "NC State" is 6/7 = 0.857 alike but a different school, so
+            # short names are excluded and the bar is 0.9.
+            if min(len(t_compact), len(c_compact)) >= 8 and sm.real_quick_ratio() >= 0.9 and sm.quick_ratio() >= 0.9:
+                ratio = sm.ratio()
+                if ratio >= 0.9:
+                    best = max(best, ratio)
+        if best >= 0.85:
+            return best
+        for variant in _alias_variants(t):
+            v_compact = "".join(variant)
+            if len(v_compact) < 3:
+                continue
+            for c, c_compact in cands:
+                if variant == c or v_compact == c_compact:
+                    best = max(best, 0.8)
+                    continue
+                if len(c) == 1 and len(c_compact) <= 4 and len(variant) > 1:
+                    continue
+                # Alias matches must be a name PREFIX ("SE Louisiana" -> "SE Louisiana Lions",
+                # "Grambling" -> "Grambling Tigers"): a suffix would let "Utah State" -> "Utah"
+                # match "Southern Utah".
+                if (len("".join(variant)) >= 3 and len(variant) < len(c) and c[:len(variant)] == variant):
+                    best = max(best, 0.8)
         return best
 
     @classmethod
@@ -1765,6 +1930,8 @@ class Plugin:
 
         best_event, best_rank = None, None
         slug_pool = _SPORT_SLUG_POOL.get(league_slug, (league_slug,))
+        candidates = []          # (event, start, scores)
+        away_strong = home_strong = False
         for ev in events:
             if ev.get("league_slug") not in slug_pool:
                 continue
@@ -1792,8 +1959,27 @@ class Plugin:
             # relationship to the order a provider lists "Player1 vs Player2" in —
             # direct-only comparison silently missed every correct match in
             # testing whenever SDP happened to list the two players the other way.
-            direct = min(score_fn(away_text, *ev_away), score_fn(home_text, *ev_home))
-            swapped = min(score_fn(away_text, *ev_home), score_fn(home_text, *ev_away))
+            sa_d, sh_d = score_fn(away_text, *ev_away), score_fn(home_text, *ev_home)
+            sa_s, sh_s = score_fn(away_text, *ev_home), score_fn(home_text, *ev_away)
+            # Remember whether each side of the channel has a REAL (>= 0.85) match to
+            # some team in this window — see the alias guard below.
+            away_strong = away_strong or max(sa_d, sa_s) >= 0.85
+            home_strong = home_strong or max(sh_d, sh_s) >= 0.85
+            candidates.append((ev, start, (sa_d, sh_d, sa_s, sh_s)))
+
+        for ev, start, (sa_d, sh_d, sa_s, sh_s) in candidates:
+            # Alias-tier matches (score 0.8: "SC State" -> "South Carolina State",
+            # "Grambling State" -> "Grambling") are only trusted when that side of the
+            # channel has NO real match anywhere in the window. If a real "Colorado
+            # State" game exists, "Colorado State" must not be aliased onto "Colorado".
+            if away_strong:
+                sa_d, sa_s = (sa_d if sa_d >= 0.85 else 0.0), (sa_s if sa_s >= 0.85 else 0.0)
+            if home_strong:
+                sh_d, sh_s = (sh_d if sh_d >= 0.85 else 0.0), (sh_s if sh_s >= 0.85 else 0.0)
+            # An alias-tier side is only accepted alongside a REAL match on the other
+            # side — two weak sides together are not evidence of the right game.
+            direct = min(sa_d, sh_d) if max(sa_d, sh_d) >= 0.85 else 0.0
+            swapped = min(sa_s, sh_s) if max(sa_s, sh_s) >= 0.85 else 0.0
             combined = max(direct, swapped)
             # Require BOTH sides to independently match well — averaging let one
             # strong match mask a completely wrong other team, so use the weaker
@@ -2028,8 +2214,19 @@ class Plugin:
 
         away_name = event.get("away_team_name") or event.get("away_team_abbr") or "Away"
         home_name = event.get("home_team_name") or event.get("home_team_abbr") or "Home"
-        away_slug = self._slugify_team(event.get("away_team_abbr") or away_name)
-        home_slug = self._slugify_team(event.get("home_team_abbr") or home_name)
+        # game-thumbs identifies a team by name or by ITS OWN abbreviation. For most
+        # leagues the feed's ESPN abbreviation matches, but for college football ESPN's
+        # abbreviations don't always (MTSU/JVST, AFA/NEV -> HTTP 400 "Team not found"
+        # while the full names resolve), leaving matched channels with no logo. Use the
+        # full name slug for those leagues (60/60 college games resolved by name vs 59/60
+        # by abbreviation); every other league keeps the abbreviation (which resolves
+        # better for e.g. MLS, where names like "CF Montréal" fail).
+        if event.get("league_slug") in _LOGO_NAME_SLUG_LEAGUES:
+            away_slug = self._slugify_team(away_name)
+            home_slug = self._slugify_team(home_name)
+        else:
+            away_slug = self._slugify_team(event.get("away_team_abbr") or away_name)
+            home_slug = self._slugify_team(event.get("home_team_abbr") or home_name)
 
         start = datetime.fromisoformat(event["start_time_utc"].replace("Z", "+00:00"))
         start_short, start_day, start_date, start_time_et_ct = self._us_time_strs(start)
