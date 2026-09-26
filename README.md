@@ -41,11 +41,11 @@ For groups with a Sport Template selected, EPG & Sports Editor fetches live sche
 
 - **Renames the channel** using a `{variable}`-driven template (e.g. `Denver Broncos @ Atlanta Falcons`, or `Alex Michelsen vs Taylor Fritz` for tennis)
 - **Assigns a logo** via a matchup thumbnail/logo API ([sethwv/game-thumbs](https://github.com/sethwv/game-thumbs) — self-hostable, or use the public default instance) for team sports
-- **Generates three EPG program blocks** around the real event time: Pregame, Live (event start through an estimated end based on the sport), and Postgame — each with its own title/description template
+- **Generates three EPG program blocks** around the real event time: Pregame, Live (event start through an estimated end based on the sport), and Postgame — each with its own title/description template, and with **configurable Pregame and Postgame windows** (how long before kickoff / after the game ends the channel keeps its game name and guide blocks)
 
 **93 leagues are supported** — every major US team sport (NFL, NBA, MLB, NHL, NCAA Football, MLS, and dozens more including softball, volleyball, lacrosse, and NCAA variants), 30+ soccer competitions worldwide (Premier League, La Liga, Bundesliga, Serie A, Ligue 1, FIFA World Cup, and more), tennis (ATP/WTA), golf (PGA TOUR/LPGA), all three NASCAR series, Formula 1, UFC/MMA/boxing/darts, and a few niche sports (surfing, fishing). Two different matching engines run under the hood depending on the sport — team/individual matchup sports split the channel name into two competitors, while golf/NASCAR/F1-style sports match one descriptive event title instead — but this is automatic per sport, nothing to configure. See the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#full-league-list)** for the complete list.
 
-All scheduling is UTC-anchored, matching Dispatcharr's own timezone-neutral convention — every variable is also available in a US Eastern/Central-formatted flavor (`{start_time_et_ct}`, etc., matching broadcast-standard convention for these leagues) and a plain UTC flavor (`{start_time_utc}`, etc.) side by side, so templates read correctly for viewers anywhere. An optional instance-wide **Local Display Timezone** setting (any IANA zone name) additionally unlocks a `{start_time_local}` flavor, DST-correct, for instances whose audience isn't US-based.
+All stored times are UTC (Dispatcharr's own timezone-neutral convention) — the schedule feed, matching windows, game start/end and every EPG block boundary; only the *text* in titles and descriptions is formatted for a timezone. Every variable is also available in a US Eastern/Central-formatted flavor (`{start_time_et_ct}`, etc., matching broadcast-standard convention for these leagues) and a plain UTC flavor (`{start_time_utc}`, etc.) side by side, so templates read correctly for viewers anywhere. An optional instance-wide **Local Display Timezone** setting (any IANA zone name) additionally unlocks a `{start_time_local}` flavor, DST-correct, for instances whose audience isn't US-based.
 
 If a channel can't be confidently matched to a real game, the group's regular Rename Rules still apply as a fallback (or run standalone if no Sport Template is selected). See **Sport Templates Guide** below for the full setup walkthrough, variable reference, matching-engine caveats, and starter templates per league.
 
@@ -66,7 +66,7 @@ If a channel can't be confidently matched to a real game, the group's regular Re
 
 ### Manual Install
 
-Copy `plugin.py` and `plugin.json` into your Dispatcharr plugins directory and reload plugins.
+Copy `plugin.py` and `plugin.json` into your Dispatcharr plugins directory (any folder name works as of v0.4.06 — e.g. `epg-and-sports-editor` or `epg_and_sports_editor`) and reload plugins.
 
 ---
 
@@ -312,12 +312,17 @@ One section appears per sport. Each defines the templates used when a channel gr
 |---|---|
 | **Channel Name** | Renames the matched auto-created channel |
 | **Logo URL** | Assigned as the channel's logo |
-| **Pregame Title / Description** | EPG block covering midnight UTC through kickoff on game day |
+| **Pregame Title / Description** | EPG block from the start of the Pregame Window (below) through kickoff |
 | **Live Title / Description** | EPG block covering the estimated game window |
-| **Postgame Title / Description** | EPG block covering 1 hour after the estimated end |
+| **Postgame Title / Description** | EPG block from the estimated end through the end of the Postgame Window (below) |
+
+Global Sports Editor settings (one each, shared by every sport):
 
 | Setting | Description |
 |---|---|
+| **Pregame Window (before kickoff)** | When the Pregame block starts. **All day** (default) = from midnight on game day in your Local Display Timezone (US Eastern if blank), but never less than 6 hours before kickoff; or choose a fixed **0 / 1 / 2 / 3 / 4 / 6 / 12 / 24 hours** before kickoff (0 = no Pregame block). Only affects the guide block — a game is matched and the channel renamed as soon as it appears in the schedule. |
+| **Postgame Window (hours after the game ends)** | How long a matched channel keeps its game name, logo and a "Postgame" block after the game's estimated end: **0 / 1 / 2 / 3 (default) / 4 / 6 / 8 / 12 hours**. Once it passes, the game counts as finished — the next M3U refresh restores the provider's original name and the channel is no longer rewritten. |
+| **Local Display Timezone (optional)** | Any IANA zone (e.g. `Pacific/Auckland`, `Europe/London`). Unlocks the `{start_time_local}` variables and sets the "midnight" used by the Pregame Window. Blank = US Eastern for the Pregame anchor. |
 | **Game Thumbs Base URL** | Base URL of a [sethwv/game-thumbs](https://github.com/sethwv/game-thumbs) instance used by Logo URL templates via `{gamethumbs_base}`. Defaults to a publicly hosted instance — point this at your own self-hosted instance if you run one. |
 
 ---
@@ -390,6 +395,24 @@ Fixed in v0.4.06. The schedule feed carries a second broadcast-only row per game
 
 **A brand-new channel group doesn't appear in the Sports Editor settings until it already has channels.**
 Improved in v0.4.06: groups with Auto Channel Sync enabled are now listed even before their first channels exist. Dispatcharr builds the settings form when the plugin loads, so use the plugins **Restart Dispatcharr**/reload after enabling Auto Channel Sync on a new group for it to show up.
+
+**A channel gets its game name and logo, then goes back to the provider's original name after the game.**
+That's by design: once a game's window has passed (estimated end + the **Postgame Window** setting), the game counts as finished, and the next M3U refresh restores the provider's name and stops rewriting the channel. Before v0.4.07 that window was a fixed 1 hour; it is now a setting (default 3 hours, up to 12) under Sports Editor → **Postgame Window**. A late-night check (e.g. 11:54 PM for an 8:00 PM game that ended 10:45 PM) used to look like "no match".
+
+**How long does a game show as "Pregame"?**
+Set by **Pregame Window** (Sports Editor settings). The default is "all day" — from midnight on game day in your **Local Display Timezone** (US Eastern if that's blank), but never less than 6 hours before kickoff. Earlier versions anchored "midnight" to UTC, so a game kicking off just after UTC midnight (e.g. 8:00 PM US Eastern) got almost no pregame while a 7:00 PM one got ~23 hours. Pick a fixed number of hours if you want the same length for every game regardless of timezone.
+
+**"NCAA Football" and "NCAAF" both show up as Sport Templates — which one should I pick?**
+Either, as of v0.4.07. The schedule feed publishes college football under two slugs: `ncaaf` (the real ESPN scoreboard) and `ncaa-football` (an ESPN+ *watch* feed that is mostly studio/replay programming). Earlier versions matched only the slug you picked, so "NCAA Football" matched almost nothing. Both templates now search both feeds and prefer the real scoreboard game.
+
+**Channels named like `NCAAF01: 7:30PM NC State at Wake Forest`, `(Apple) (MLS) 031 | Vancouver vs. D.C. (Spanish)` or `US - NHL GAME 03 : DALLAS STARS @ MINNESOTA WILD SEP 25 - 8:00 PM ET` didn't match.**
+Fixed in v0.4.07. Provider tags, game numbers, times, dates, rankings (`#15`), language/feed notes and underscores (`New_York_City`) are now stripped from each team's text before matching — from the *start* of the away side and the *end* of the home side only, so real team names (`Miami (OH)`, `49ers`, `Bayer 04 Leverkusen`) are never altered.
+
+**A channel was renamed to the wrong game.**
+Fixed in v0.4.07. Team matching used to accept any 60%-similar text, so words like "State" or near-identical abbreviations (`NYR`/`NYI`) could match an unrelated game when the real one wasn't in the schedule yet. Matching now compares whole words — a partial name must be a whole-word prefix or suffix (`Vancouver` → `Vancouver Whitecaps`, but `Tennessee` no longer matches `Middle Tennessee`) — and fuzzy spelling matches need to be near-identical. Very loose abbreviations (`Man Utd`) may no longer match; a missed match is safer than renaming the wrong game. TV-show rows from the watch feed (`SEC Inside: Auburn`) are also ignored.
+
+**The Sports Editor EPG source shows "error — Failed to download EPG data" but my guide is fine.**
+Fixed in v0.4.07. Linking a channel to the plugin's generated EPG made Dispatcharr queue a file-parsing job that can't succeed for a source with no file, and it stamped the source with an error. The plugin now links channels without triggering that job, and also clears Dispatcharr's cached guide output after writing programs (previously the XMLTV guide could keep serving old titles after a program change).
 
 **Where did SiriusXM channel management go?**
 It's been removed from EPG & Sports Editor as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Ticker](https://github.com/jstevenscl/ticker) plugin.

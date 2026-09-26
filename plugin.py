@@ -11,6 +11,7 @@ a Sports Editor that matches auto-synced channels against live schedule data.
 import logging
 import os
 import re
+import unicodedata
 from django.db import transaction
 
 LOGGER = logging.getLogger("plugins.epg-and-sports-editor")
@@ -48,6 +49,41 @@ def _find_plugin_config(enabled_only=False):
     return None
 
 
+def _link_channel_epg(channel, epg_entry):
+    """Point `channel` at a plugin-owned EPGData row WITHOUT firing Dispatcharr's
+    Channel post_save signal.
+
+    That signal queues parse_programs_for_tvg_id for the newly linked EPGData, which
+    expects an XMLTV file on disk for the source. Every EPG source this plugin owns
+    (Sports Editor / Fill / the per-source virtual copies) is a URL-less xmltv source
+    because the plugin writes the ProgramData rows itself — so the parse task can
+    only fail, and it stamps the source `status="error"` ("Failed to download EPG
+    data, cannot parse programs") even though the program data is fine. A queryset
+    .update() skips model signals; callers invalidate the guide cache themselves via
+    _invalidate_epg_output_cache() once their program rows are committed."""
+    type(channel).objects.filter(pk=channel.pk).update(epg_data=epg_entry)
+    channel.epg_data = epg_entry
+
+
+def _invalidate_epg_output_cache():
+    """Drop Dispatcharr's cached /output/epg (XMLTV) chunks once the current
+    transaction commits, so the guide rebuilds from the programs this plugin just
+    wrote. Dispatcharr's own signal did this as a side effect of linking a channel
+    (before our program rows were written, and not at all when a channel was already
+    linked and only its programs changed). Guarded: a Dispatcharr without this
+    helper simply skips it."""
+    def _do():
+        try:
+            from apps.output.streaming_chunk_cache import invalidate_epg_chunk_cache
+            invalidate_epg_chunk_cache()
+        except Exception as e:
+            LOGGER.debug(f"EPG & Sports Editor: could not invalidate EPG output cache: {e}")
+    try:
+        transaction.on_commit(_do)
+    except Exception:
+        _do()
+
+
 # Pre-rename identifiers (this plugin shipped as "EPGeditARR"/"epgeditarr" through
 # v0.3.03) — kept around solely so _migrate_from_legacy_key() can find and carry
 # forward an existing install's settings/virtual EPG sources without orphaning them.
@@ -75,10 +111,75 @@ SPORTS_EPG_SOURCE_NAME = "EPG & Sports Editor: Sports Editor"
 # update settings: 400" error even though the action itself completes fine.
 SDP_CACHE_KEY = "epg_and_sports_editor:sdp_schedule_cache"
 SDP_CACHE_TTL_SECS = 30 * 60
+
+# How long after a game's estimated end a matched channel keeps its game name/logo and
+# a "Postgame" EPG block. User-configurable (Sports Editor -> "Postgame Window"); the
+# automatic post-refresh path reads RAW saved settings, so an unsaved field must fall
+# back to this default rather than to "nothing".
+SPORTS_POSTGAME_HOURS_DEFAULT = 3.0
+SPORTS_POSTGAME_HOURS_MAX = 12.0          # _find_sdp_event only looks back 20h from now
+SPORTS_POSTGAME_HOURS_OPTIONS = ["0", "1", "2", "3", "4", "6", "8", "12"]
+
+# When a matched game's "Pregame" guide block starts. "midnight" (default) = 00:00 on the
+# game's calendar day in the viewer's timezone (Local Display Timezone, else US Eastern),
+# so a game-dedicated channel reads as pregame all day — but never less than
+# SPORTS_PREGAME_MIDNIGHT_MIN_HOURS before kickoff, so a kickoff shortly after local
+# midnight (common for viewers far from the game's timezone) still gets a real pregame.
+# Otherwise N hours before kickoff.
+SPORTS_PREGAME_DEFAULT = "midnight"
+SPORTS_PREGAME_MIDNIGHT_MIN_HOURS = 6.0   # "midnight" never yields less than this before kickoff
+SPORTS_PREGAME_HOURS_MAX = 48.0
+SPORTS_PREGAME_OPTIONS = ["midnight", "0", "1", "2", "3", "4", "6", "12", "24"]
+
+
+def _pregame_start(start_utc, settings):
+    """UTC datetime at which the Pregame block starts for a game kicking off at
+    `start_utc`, per the "Pregame Window" setting (see SPORTS_PREGAME_*). A missing,
+    blank or garbled value means the default. The old behavior anchored "all day" to
+    UTC midnight, which made it depend on whether kickoff crossed UTC midnight — an
+    8:10 PM ET game got ~10 minutes of pregame, a 7:00 PM ET game ~23 hours."""
+    from datetime import timedelta, timezone
+    settings = settings or {}
+    val = settings.get("sports_editor_pregame_hours")
+    raw = SPORTS_PREGAME_DEFAULT if val in (None, "") else str(val).strip().lower()
+    if raw != SPORTS_PREGAME_DEFAULT:
+        try:
+            return start_utc - timedelta(hours=max(0.0, min(SPORTS_PREGAME_HOURS_MAX, float(raw))))
+        except ValueError:
+            pass
+    tz = None
+    try:
+        from zoneinfo import ZoneInfo
+        for name in (settings.get("sports_editor_display_tz"), "America/New_York"):
+            if not name:
+                continue
+            try:
+                tz = ZoneInfo(name)
+                break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if tz is None:
+        tz = timezone(timedelta(hours=-4 if 3 <= start_utc.month <= 11 else -5))   # US Eastern approximation
+    local = start_utc.astimezone(tz)
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    return min(midnight, start_utc - timedelta(hours=SPORTS_PREGAME_MIDNIGHT_MIN_HOURS))
+
+
+def _postgame_hours(settings):
+    """Configured postgame window in hours, clamped to [0, SPORTS_POSTGAME_HOURS_MAX];
+    the default for a missing/blank/garbled value."""
+    try:
+        hours = float((settings or {}).get("sports_editor_postgame_hours"))
+    except (TypeError, ValueError):
+        return SPORTS_POSTGAME_HOURS_DEFAULT
+    return max(0.0, min(SPORTS_POSTGAME_HOURS_MAX, hours))
 # How long a stale cache entry stays available as a fetch-failure fallback.
 SDP_CACHE_STALE_TTL_SECS = 24 * 60 * 60
 
 _MATCHUP_SEP_RE = re.compile(r"\s+(?:@|vs\.?|v\.?|at)\s+", re.IGNORECASE)
+
 
 # Key = sports-data-platform's own league_slug (api.tickarr.com), reused directly
 # as the game-thumbs league slug too for team sports. Covers every league_slug SDP
@@ -361,6 +462,97 @@ _TRAILING_FEED_TAG_ONLY_RE = re.compile(
 _LEADING_PIPE_EVENT_RE = re.compile(
     r'^[A-Za-z0-9+]{2,10}\s*\|\s*Event\s*\d+\s*\|\s*\d{1,2}(?::\d{2})?(?:AM|PM)\s+', re.IGNORECASE,
 )
+
+# Some sports are published under more than one league slug in the schedule feed.
+# College football: "ncaaf" is the real ESPN scoreboard, while "ncaa-football" is the
+# ESPN+ *watch* feed (mostly studio/replay programming, plus some real games the
+# scoreboard row is missing) — and both appear in the Sport Template dropdown, so a
+# user picking either one must see games from both. Team-vs-team ranking already
+# prefers the complete scoreboard row (see _find_sdp_event).
+_SPORT_SLUG_POOL = {
+    "ncaa-football": ("ncaa-football", "ncaaf"),
+    "ncaaf": ("ncaaf", "ncaa-football"),
+}
+
+# ── Per-side matchup cleanup ────────────────────────────────────────────────
+# Provider names wrap the real team text in feed tags and times, e.g.
+#   "NCAAF01: 7:30PM NC State at Wake Forest"   "NCAAF 04: NCAAF Harvard at Brown @7:00 pm"
+#   "(Apple) (MLS) 031 |  Vancouver vs. D.C. (Spanish) (2026-09-26 22:25:25)"
+#   "US| NBA LIVE [BG] 03 [Grizzlies vs Warriors (ESPN In_Arena) (2026-07-19 21:00:00)]"
+#   "NHL | 04 - 7pm Hurricanes at Panthers"   "USA NHL 07: UTA VS VGK (NHLN Feed ) @ 10:00 pm"
+# Once the name is split on the away/home separator the junk sits at the START of the
+# away side and the END of the home side, so it is removed per side (never from the
+# middle of a team name). Every pattern is anchored and requires a digit/time/keyword
+# so real team names ("49ers", "Miami (OH)", "Bayer 04 Leverkusen") are left alone.
+_LEAGUE_WORDS_RE_FRAG = (
+    r"(?:NCAAF|NCAAB|NCAA|CFB|NFL|NBA|WNBA|MLB|MLS|NHL|NWSL|EPL|UFC|ATP|WTA|"
+    r"COLLEGE FOOTBALL|COLLEGE BASKETBALL)"
+)
+_MATCHUP_LEAD_RES = [
+    re.compile(r"^\s*(?:\([^)]{1,20}\)\s*)+"),                                      # "(Apple) (MLS) "
+    re.compile(r"^\s*(?:USA?|CA|UK)\s*[-|:]\s*", re.IGNORECASE),                    # "US| " "US - "
+    re.compile(r"^\s*[A-Za-z][A-Za-z0-9+.\s]{0,22}?\|\s*\d{1,3}\s*[-:|\]]\s*"),      # "NHL | 04 - "
+    re.compile(r"^\s*[A-Za-z][A-Za-z0-9+.\s]{0,22}?\d{1,3}\s*[|:\]\-]\s*"),         # "NCAAF 04:" "NHL09:" "NFL GP 34 |"
+    re.compile(r"^\s*\d{1,3}\s*[|:\-]\s*"),                                         # leftover "031 | "
+    re.compile(rf"^\s*{_LEAGUE_WORDS_RE_FRAG}\s*[:\-|]?\s+", re.IGNORECASE),        # repeated league word
+    re.compile(r"^\s*\d{1,2}(?::\d{2})?\s*[AaPp][Mm]\s*[-:|]?\s+"),                 # "7:30PM " "8pm "
+]
+_MATCHUP_RANK_RE = re.compile(r"^\s*(?:#\d{1,2}|\(\d{1,2}\)|No\.\s*\d{1,2})\s+", re.IGNORECASE)
+_MATCHUP_TRAIL_RES = [
+    re.compile(                                                                      # "(Spanish)" "(NHLN Feed )" "(2026-09-26 19:25)"
+        r"\s*\((?=[^)]*(?:\d|feed|spanish|french|english|portuguese|\bhd\b|\balt\b|espn|arena|cast|home|away|national))[^)]*\)\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\s*@\s*\d{1,2}(?::\d{2})?\s*[AaPp][Mm].*$"),                       # "@7:00 pm"
+    re.compile(rf"\s*@\s*(?:\d{{1,2}}\s+)?{_MONTHS_RE_FRAG}\w*\.?\s+\d{{0,2}}.*$", re.IGNORECASE),  # "@ 25 Sep 07:00 PM" "@ Sep 24 08:15 PM ET - Special Feed"
+    re.compile(rf"\s+-\s+{_MONTHS_RE_FRAG}\w*\s+\d{{1,2}}\b.*$", re.IGNORECASE),    # " - Sep 24 - 8:40 am"
+    re.compile(rf"\s+{_MONTHS_RE_FRAG}\w*\s+\d{{1,2}}\s+\d{{1,2}}(?::\d{{2}})?\s*[AaPp][Mm].*$", re.IGNORECASE),  # "Aug 23 7:00PM ET"
+    re.compile(rf"\s+{_MONTHS_RE_FRAG}[a-z]*\.?\s+\d{{1,2}}\b.*$", re.IGNORECASE),  # " SEP 25 - 8:00 PM ET / 1:00 AM UK"
+    re.compile(r"\s*\|\s*[A-Za-z]+,\s.*$"),                                         # "| Saturday, 08 March 2025 20:00"
+    re.compile(r"\s*@\s*$"),                                                        # dangling "@"
+]
+
+
+def _clean_matchup_side(text, side):
+    """Strip provider tags/times off one side of an already-split matchup. `side` is
+    "away" (leading junk) or "home" (trailing junk). Falls back to the input if
+    cleaning would leave nothing."""
+    orig = (text or "").strip()
+    s = orig.replace("_", " ")
+    if side == "away":
+        if "[" in s:
+            pre, post = s.rsplit("[", 1)
+            if post.strip() and re.search(r"\d|live", pre, re.IGNORECASE):
+                s = post
+        for _ in range(4):
+            before = s
+            for rx in _MATCHUP_LEAD_RES:
+                s2 = rx.sub("", s, count=1)
+                if s2.strip():
+                    s = s2
+            if s == before:
+                break
+    else:
+        for _ in range(3):
+            before = s
+            for rx in _MATCHUP_TRAIL_RES:
+                s2 = rx.sub("", s, count=1)
+                if s2.strip():
+                    s = s2
+            # A trailing ")" / "]" is noise only when it has no opener in the text
+            # (left over from a wrapper like "[Team vs Team (note)]") — never strip
+            # the closer of a balanced group such as "Miami (OH)".
+            s = s.rstrip()
+            while s and s[-1] in ")]" and s.count(s[-1]) > s.count("(" if s[-1] == ")" else "["):
+                s = s[:-1].rstrip()
+            if s == before:
+                break
+    s2 = _MATCHUP_RANK_RE.sub("", s, count=1)
+    if s2.strip():
+        s = s2
+    s = re.sub(r"\s+", " ", s).strip(" \t-|:,")
+    return s or orig
+
 
 # Golf/NASCAR single-title scoring: words too generic to identify *which event
 # this is* (shared across nearly every broadcast in the sport) — excluded from
@@ -746,6 +938,47 @@ class Plugin:
                 "Base URL of a sethwv/game-thumbs instance (https://github.com/sethwv/game-thumbs), "
                 "used for matchup thumbnail/logo generation. Defaults to a publicly hosted instance — "
                 "point this at your own self-hosted instance instead if you run one."
+            ),
+        })
+
+        fields.append({
+            "id": "sports_editor_pregame_hours",
+            "label": "Pregame Window (before kickoff)",
+            "type": "select",
+            "default": SPORTS_PREGAME_DEFAULT,
+            "options": [
+                {"value": v, "label": (
+                    "All day — from midnight on game day (min. 6 hours)" if v == "midnight"
+                    else "No pregame block" if v == "0"
+                    else f"{v} hour" + ("" if v == "1" else "s") + " before kickoff")}
+                for v in SPORTS_PREGAME_OPTIONS
+            ],
+            "help_text": (
+                "When a matched game's 'Pregame' guide block starts. The default shows the channel as "
+                "pregame from midnight on game day (in your Local Display Timezone below, or US Eastern if "
+                "that is blank) — but never for less than 6 hours before kickoff, so a game that starts "
+                "shortly after your local midnight still gets a real pregame. Pick a number of hours to "
+                "show pregame for exactly that long before kickoff. "
+                "This controls only the Pregame guide block — a game is matched and the channel renamed as "
+                "soon as it appears in the schedule, regardless of this setting."
+            ),
+        })
+
+        fields.append({
+            "id": "sports_editor_postgame_hours",
+            "label": "Postgame Window (hours after the game ends)",
+            "type": "select",
+            "default": str(int(SPORTS_POSTGAME_HOURS_DEFAULT)),
+            "options": [
+                {"value": v, "label": ("No postgame — revert as soon as the game ends" if v == "0" else f"{v} hour" + ("" if v == "1" else "s"))}
+                for v in SPORTS_POSTGAME_HOURS_OPTIONS
+            ],
+            "help_text": (
+                "How long a matched channel keeps its game name, logo and a 'Postgame' guide block AFTER "
+                "the game's estimated end. Once this window passes, the game is treated as finished: the "
+                "next M3U refresh restores the provider's original channel name and the channel is no "
+                "longer rewritten. Longer values keep finished games' names and recaps visible for longer "
+                "(useful if you check the guide late at night); shorter values free the channel sooner."
             ),
         })
 
@@ -1453,24 +1686,52 @@ class Plugin:
         away, home = parts[0].strip(), parts[1].strip()
         if not away or not home:
             return None
+        if strip_noise:
+            away, home = _clean_matchup_side(away, "away"), _clean_matchup_side(home, "home")
         return away, home
 
     @staticmethod
     def _team_match_score(text, *candidates):
+        """How well a channel's team text matches a feed team (name/abbr/short name).
+
+        Whole-WORD comparison, accent- and punctuation-insensitive ("Montréal" ==
+        "Montreal", "D.C." == "DC", "St. Louis" == "St Louis"):
+          1.0   identical word sequence
+          0.85  one side is a whole-word prefix or suffix of the other
+                ("Tennessee" -> "Tennessee Volunteers", "Vancouver" -> "Vancouver
+                Whitecaps", "Everton FC" -> "Everton") — but NOT a word in the middle
+                ("Tennessee" must not match "Middle Tennessee Blue Raiders")
+          else  fuzzy similarity, only when it's a near-identical spelling (>= 0.85)
+        The old scoring accepted 0.6 raw character similarity, which happily matched
+        "Kennesaw State" to "Jacksonville State" and the abbreviations NYR/NYI —
+        renaming a channel to the wrong game."""
         import difflib
-        text_l = (text or "").lower().strip()
-        if not text_l:
+
+        def _tokens(value):
+            v = unicodedata.normalize("NFKD", (value or "").lower())
+            v = "".join(ch for ch in v if not unicodedata.combining(ch))
+            return re.findall(r"[a-z0-9]+", v)
+
+        t = _tokens(text)
+        if not t:
             return 0.0
+        t_compact = "".join(t)
         best = 0.0
         for cand in candidates:
-            cand_l = (cand or "").lower().strip()
-            if not cand_l:
+            c = _tokens(cand)
+            if not c:
                 continue
-            if cand_l == text_l:
+            c_compact = "".join(c)
+            if t == c or t_compact == c_compact:
                 return 1.0
-            if cand_l in text_l or text_l in cand_l:
+            short, long_ = (t, c) if len(t) <= len(c) else (c, t)
+            if (len("".join(short)) >= 3 and len(short) < len(long_)
+                    and (long_[:len(short)] == short or long_[-len(short):] == short)):
                 best = max(best, 0.85)
-            best = max(best, difflib.SequenceMatcher(None, text_l, cand_l).ratio())
+                continue
+            ratio = difflib.SequenceMatcher(None, t_compact, c_compact).ratio()
+            if ratio >= 0.85:
+                best = max(best, ratio)
         return best
 
     @classmethod
@@ -1503,8 +1764,9 @@ class Plugin:
         window_end = now + timedelta(days=10)
 
         best_event, best_rank = None, None
+        slug_pool = _SPORT_SLUG_POOL.get(league_slug, (league_slug,))
         for ev in events:
-            if ev.get("league_slug") != league_slug:
+            if ev.get("league_slug") not in slug_pool:
                 continue
             raw_start = ev.get("start_time_utc")
             if not raw_start:
@@ -1514,6 +1776,13 @@ class Plugin:
             except ValueError:
                 continue
             if start < window_start or start > window_end:
+                continue
+
+            # ESPN+ "watch" rows are often studio/replay programming whose "team" is a
+            # show title ("SEC Inside: Auburn", "SEC Storied: ...") — real team names
+            # never contain a colon, and a partial-name hit on one of these would
+            # rename a channel to a TV show instead of the game.
+            if ":" in (ev.get("away_team_name") or "") or ":" in (ev.get("home_team_name") or ""):
                 continue
 
             ev_away = (ev.get("away_team_name"), ev.get("away_team_abbr"), ev.get("away_team_short_name"))
@@ -1546,7 +1815,7 @@ class Plugin:
             if best_rank is None or rank > best_rank:
                 best_rank, best_event = rank, ev
 
-        return best_event if best_rank is not None and best_rank[0] >= 0.6 else None
+        return best_event if best_rank is not None and best_rank[0] >= 0.8 else None
 
     # ── Single-title matching (golf, NASCAR) ────────────────────────────────
     # No away/home split exists for these — SDP puts one descriptive broadcast-
@@ -1703,15 +1972,6 @@ class Plugin:
         start_date = f"{_MONTHS[et.month - 1]} {et.day}"
         start_time_et_ct = f"{fmt(et)} ET / {fmt(ct)} CT"
         return start_short, start_day, start_date, start_time_et_ct
-
-    @staticmethod
-    def _utc_midnight_before(dt_utc):
-        """Return midnight UTC on the same UTC calendar date as dt_utc — used as the
-        Pregame block's start time, so a game-dedicated channel shows as pregame all
-        day rather than just the hour before kickoff. Anchored to UTC (not a US
-        timezone) since Dispatcharr itself is timezone-neutral and this plugin is
-        used by viewers worldwide."""
-        return dt_utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
     @staticmethod
     def _utc_time_strs(dt_utc):
@@ -1968,11 +2228,12 @@ class Plugin:
         start = datetime.fromisoformat(event["start_time_utc"].replace("Z", "+00:00"))
         duration_hours = _LEAGUE_DURATION_HOURS.get(sport_slug, 3.0)
         est_end = start + timedelta(hours=duration_hours)
-        # Pregame runs from midnight ET on game day through kickoff, not just an hour
-        # before — a channel dedicated to one game should show as "pregame" all day,
-        # not sit on generic/no-data content until an hour prior.
-        pre_start = self._utc_midnight_before(start)
-        post_end = est_end + timedelta(hours=1)
+        # Pregame defaults to "all day" (from midnight on game day) rather than just an
+        # hour before — a channel dedicated to one game should show as "pregame" all
+        # day, not sit on generic/no-data content until an hour prior. Configurable via
+        # the "Pregame Window" setting (see _pregame_start).
+        pre_start = _pregame_start(start, settings)
+        post_end = est_end + timedelta(hours=_postgame_hours(settings))
         if post_end < datetime.now(timezone.utc):
             return False
 
@@ -1998,8 +2259,7 @@ class Plugin:
             epg_entry.name = ch.name
             epg_entry.save(update_fields=["name"])
         if ch.epg_data_id != epg_entry.id:
-            ch.epg_data = epg_entry
-            ch.save(update_fields=["epg_data"])
+            _link_channel_epg(ch, epg_entry)
 
         # This EPGData is created and owned exclusively for this one channel (tvg_id
         # is keyed off the channel's own id), so it's always safe to wipe and rebuild
@@ -2013,6 +2273,8 @@ class Plugin:
             (start, est_end, "live_title", "live_desc", "live"),
             (est_end, post_end, "post_title", "post_desc", "postgame"),
         ]:
+            if b_end <= b_start:
+                continue        # e.g. Postgame Window set to 0 hours
             default_title, default_desc = defaults[title_key], defaults[desc_key]
             v = self._build_sdp_template_vars(
                 event, gamethumbs_base, league_label, phase, feed_tag=feed_tag, display_tz=display_tz
@@ -2074,6 +2336,8 @@ class Plugin:
                     except Exception as e:
                         LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
 
+        if matched:
+            _invalidate_epg_output_cache()
         self._mark_epg_source_success(
             epg_source, f"Sports Editor: {matched} channel(s) matched, {scanned} scanned"
         )
@@ -2129,6 +2393,8 @@ class Plugin:
                 )
                 lines.extend(examples)
 
+        if total_matched:
+            _invalidate_epg_output_cache()
         self._mark_epg_source_success(
             epg_source, f"Sports Editor: {total_matched} channel(s) matched, {total_scanned} scanned"
         )
@@ -2369,6 +2635,7 @@ class Plugin:
                 ProgramData.objects.bulk_create(batch)
                 total += len(batch)
 
+        _invalidate_epg_output_cache()
         n_channels = len(assigned_tvg_ids) if assigned_tvg_ids else "all"
         LOGGER.info(
             f"EPG & Sports Editor: '{source.name}' — {total} programs written "
@@ -2428,11 +2695,12 @@ class Plugin:
                     tvg_id = ch.epg_data.tvg_id if ch.epg_data else None
                     ve = virtual_map.get(tvg_id)
                     if ve:
-                        ch.epg_data = ve
-                        ch.save(update_fields=["epg_data"])
+                        _link_channel_epg(ch, ve)
                         reassigned += 1
                     else:
                         skipped += 1
+                if reassigned:
+                    _invalidate_epg_output_cache()
                 lines.append(f"  Channels    : {reassigned} reassigned ({skipped} skipped)")
             lines.append("")
 
@@ -2833,8 +3101,7 @@ class Plugin:
                     existing_epgdata[tvg_id] = epg_entry
 
                 if ch.epg_data_id != epg_entry.id:
-                    ch.epg_data = epg_entry
-                    ch.save(update_fields=['epg_data'])
+                    _link_channel_epg(ch, epg_entry)
 
                 programs = self._generate_fill_blocks(epg_entry, ch.name, '', block_hours, days_ahead)
                 batch.extend(programs)
@@ -2847,6 +3114,7 @@ class Plugin:
             if batch:
                 ProgramData.objects.bulk_create(batch)
 
+        _invalidate_epg_output_cache()
         self._mark_epg_source_success(
             fill_source, f"Fill EPG: {len(channels):,} channels, {total_programs:,} program blocks"
         )
