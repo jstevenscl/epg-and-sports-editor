@@ -49,6 +49,16 @@ All stored times are UTC (Dispatcharr's own timezone-neutral convention) — the
 
 If a channel can't be confidently matched to a real game, the group's regular Rename Rules still apply as a fallback (or run standalone if no Sport Template is selected). See **Sport Templates Guide** below for the full setup walkthrough, variable reference, matching-engine caveats, and starter templates per league.
 
+### Network Channels
+
+Some providers name a channel after the broadcast network instead of two teams — a bare `ESPN2`, or a numbered regional-feed slot like `NCAAF 06: ABC` (common for out-of-market sports packages, where several numbered channels carry the same network because it airs a different game per region). Pick **Any Sport (network channel — match by network, not teams)** from the Sport Template dropdown for these:
+
+- A channel already inside a specific-league group (e.g. `NCAAF 06: ABC` in an NCAA-football-only group) is matched by network **within that league** automatically — no separate setup needed, since the channel name doesn't parse as `Team @ Team` in the first place.
+- A group of channels that could carry **any** sport during the day (a plain `ABC`, `ESPN2`, or `SEC Network` channel not sorted by league) should select **Any Sport** — matching then searches every league's events for one currently airing on that network, and renders it with that game's own sport's templates (so an ABC channel showing college football at noon and an NBA game at night each get the correct Pregame/Live/Postgame templates automatically).
+- Network matching prefers whatever's live right now, otherwise the soonest upcoming game on that network. If a network genuinely carries two simultaneous games (common for ABC/CBS regional Saturday windows), there's no way to tell which numbered feed is which — the schedule feed doesn't carry regional-feed assignment — so a real tie is left unmatched rather than guessed at.
+
+![Sport Template dropdown showing the Any Sport (network channel) option](docs/screenshots/11_network_channel_any_sport.png)
+
 ---
 
 ![EPG & Sports Editor installed in Dispatcharr](docs/screenshots/01_plugin_installed.png)
@@ -211,12 +221,28 @@ swap_subtitle::PATTERN::
 - When it matches, the program's Title and Sub-Title are swapped before any other rules run — so regex/replace rules below it still apply, to the swapped values
 - Only valid in **Title Rules**; a plain `regex::`/`replace::` rule can't see across fields, so this is the way to move text between Title and Sub-Title
 - The swap is skipped if Sub-Title is empty, so Title never goes blank
+- **`^` and `$` mean the WHOLE title.** `swap_subtitle::^College Football$::` only matches a title that is exactly `College Football` — a trailing space (`College Football `) or extra words (`College Football Live`, `NCAA College Football`) will not match. If it isn't swapping, drop the anchors (`swap_subtitle::College Football::`) or allow whitespace (`swap_subtitle::^\s*College Football\s*$::`). A plain `replace::` rule matches the text *anywhere* in the title, which is why a find/replace can work when an anchored swap doesn't
+- Use **Preview Rule Changes** to check: as of v0.4.09 it reports how many titles matched the pattern, how many would be swapped, and how many were skipped because their Sub-Title is empty (with the source's most common titles, quoted so stray spaces are visible, when nothing matched). Older versions always reported "0 changes" for a swap rule because the per-field preview can't see a swap. **Sample Data** shows a source's real Title / Sub-Title / Description values, which is the quickest way to see whether the matchup is actually in the Sub-Title (if it's in the Description, there is nothing to swap)
 
 Useful when a source publishes a generic title (e.g. `College Football`) with the actual matchup in the sub-title, and you want them the other way around:
 ```
 swap_subtitle::^College Football$::
 ```
 Turns `Title: College Football` / `Sub-Title: Ohio State at Michigan` into `Title: Ohio State at Michigan` / `Sub-Title: College Football`.
+
+**Only works if the source actually fills in the Sub-Title.** Some sources (e.g. **iptv-epg.org**) publish `<title>College Football</title>` with **no `<sub-title>` at all** and put the matchup on the first line of the description instead — `swap_subtitle` has nothing to swap for those and skips every program. Use `swap_description` (next section).
+
+### Description-to-title rule (Title Rules only)
+```
+swap_description::PATTERN::
+swap_description::PATTERN::EXTRACT_REGEX
+```
+- For sources where the real matchup is the **first line of the description**, e.g. a program with `Title: College Football` and `Description: "Texas at Tennessee⏎No. 14 Tennessee hosts No. 1 Texas…"`
+- When the **title matches `PATTERN`**, the description's first line becomes the new **Title**, the old title becomes the **Sub-Title** (if it had none), and the rest of the description stays as the **Description**
+- Optional `EXTRACT_REGEX` replaces "first line" when the matchup isn't on its own line: its first capture group is the new title and is removed from the description, e.g. `swap_description::College Football::^(.+? at .+?)\s{2,}` for a source that writes `Arizona at Washington State  Washington State welcomes…`
+- A program is skipped if it has no description, no newline (and no `EXTRACT_REGEX`), or an extracted title over 150 characters (that's a paragraph, not a matchup)
+- If a program does have a Sub-Title, `swap_subtitle` takes precedence for it; only one of the two fires per program. Regex/replace rules in Title, Sub-Title and Description Rules then run on the new values
+- Example: `swap_description::College Football::` — works alongside **Force Category = Series** and **Synthesize Episode Numbers**, which are applied to the same virtual copy
 
 ### Examples
 
@@ -301,7 +327,7 @@ One section appears per Dispatcharr channel group. Per-group settings:
 | Setting | Description |
 |---|---|
 | **Enable Sports Editor for this group** | Toggle the Sports Editor on/off for this channel group |
-| **Sport Template** | Pick a sport (93 supported — see the [full league list](docs/SPORT_TEMPLATES.md#full-league-list)), or none, to match this group's auto-created channels against live game data instead of/alongside rename rules. See the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md)**. |
+| **Sport Template** | Pick a sport (93 supported — see the [full league list](docs/SPORT_TEMPLATES.md#full-league-list)), **Any Sport** for [Network Channels](#network-channels) (channels named after a broadcast network instead of two teams), or none, to match this group's auto-created channels against live game data instead of/alongside rename rules. See the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md)**. |
 | **Sports Channel Rename Rules** | Rules applied to auto-created channel names in this group. Same format as EPG Sources rules above, but a separate rule set per group. Used as a fallback when no Sport Template match is found (or always, if no Sport Template is selected). |
 
 ### Sport Templates
@@ -425,6 +451,12 @@ Fixed in v0.4.08. For US leagues the watch feed lists home and away in the oppos
 
 **Small-school (FCS and below) college games were missing from the schedule.**
 Until 2026-09-26 the schedule feed only carried the top college division (FBS), so FCS-vs-FCS games such as Harvard–Brown or Yale–Cornell had nothing to match. The feed now includes the FCS; if you still see a game missing, check that your plugin is v0.4.08 or later and that the channel's team names match ESPN's (the alias step above covers the common spelling differences).
+
+**`swap_subtitle::^College Football$::` in Title Rules does nothing, and Preview says 0 changes.**
+Two separate things. (1) Preview could not show swaps before v0.4.09 — it always said "0 changes" for a `swap_subtitle` rule, and it only scanned the first 2,000 programs; it now scans up to 50,000, reports matched / would-swap / skipped counts, and explains a non-match. (2) `swap_subtitle` only swaps when the title matches **and** the program has a non-empty Sub-Title. **Many sources — iptv-epg.org for one — publish no Sub-Title and put the matchup on the first line of the description**, so `swap_subtitle` skips every program however the pattern is written (anchors, spaces and downgrading make no difference). Use the new `swap_description::College Football::` rule (v0.4.09+) instead: it takes the description's first line as the new Title and keeps the old title as the Sub-Title. Preview tells you which case you're in. See [Swap title/sub-title rule](#swap-titlesub-title-rule-title-rules-only) and [Description-to-title rule](#description-to-title-rule-title-rules-only).
+
+**A channel like `NCAAF 06: ABC` or a plain `ESPN2` never matches, even though the sport is enabled.**
+That channel name has no `Team @ Team` shape at all, so the normal matchup matcher has nothing to parse — it needs [Network Channels](#network-channels) (v0.4.09+) instead. If it's inside a specific-league group, no extra setting is needed (it's tried automatically once the matchup parse fails); for a channel that isn't tied to one league, set that group's Sport Template to **Any Sport**. If it still doesn't match, check that the channel name actually contains a recognizable network code/name (`ABC`, `ESPN2`, `SEC Network`, etc.) and that a game is genuinely airing on that network within the matching window — an empty broadcast network on SDP's feed (see the FCS/no-network FAQ entries above) looks the same as no match.
 
 **Where did SiriusXM channel management go?**
 It's been removed from EPG & Sports Editor as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Ticker](https://github.com/jstevenscl/ticker) plugin.

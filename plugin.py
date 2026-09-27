@@ -8,6 +8,7 @@ Also generates fill EPG schedules for channels with no EPG data, and includes
 a Sports Editor that matches auto-synced channels against live schedule data.
 """
 
+import collections
 import logging
 import os
 import re
@@ -100,6 +101,11 @@ FILL_SOURCE_NAME = "EPG & Sports Editor: Fill"
 FILL_CACHE_KEY = "fill_channel_cache"
 FILL_CACHE_UPDATED_KEY = "fill_channel_cache_updated"
 FILL_CACHE_TTL_DAYS = 7
+
+# Preview Rule Changes scans this many programs per source. It used to stop at the first 2000
+# — of a 9,889-program guide, in arbitrary order — so a rule aimed at a few games could report
+# "0 changes" simply because none of them were in the sample.
+PREVIEW_MAX_PROGRAMS = 50000
 
 SDP_SCHEDULE_URL = "https://api.tickarr.com/v1/schedule.json"
 SPORTS_EPG_SOURCE_NAME = "EPG & Sports Editor: Sports Editor"
@@ -474,17 +480,91 @@ _SPORT_SLUG_POOL = {
     "ncaa-football": ("ncaa-football", "ncaaf"),
     "ncaaf": ("ncaaf", "ncaa-football"),
 }
+
+# ── Network Channels ────────────────────────────────────────────────────────────
+# A "Network Channel" is a channel that names a broadcast network instead of two
+# teams — a bare "ESPN2", or a provider's numbered regional-feed slot like
+# "NCAAF 06: ABC" (common for out-of-market sports packages, where several numbered
+# channels carry the same network because it airs a different game per region).
+# Matched via _find_sdp_event_by_network / _event_has_network below, using SDP's
+# broadcast_networks field (falling back to parsing the older `broadcast` string for
+# cached events fetched before that field existed — see docs on the SDP feed).
+#
+# Sentinel value for the per-group "Sport Template" dropdown meaning "match by
+# network only, across every league" — for a channel/group that's just a network and
+# could plausibly carry any sport during the day (a plain "ABC" or "ESPN2" channel),
+# as opposed to a specific-league group whose network channels only ever show that
+# league's games (e.g. "NCAAF 06: ABC" inside an NCAA-football-only group).
+_ANY_SPORT_VALUE = "any"
+_ANY_SPORT_LABEL = "Any Sport (network channel — match by network, not teams)"
+
+# SDP's 42 canonical broadcast_networks codes (see SDP feed docs). A provider's own
+# channel-name spelling, or the older comma-joined `broadcast` string, is normalized
+# via _normalize_network_token before being compared against these.
+_NETWORK_TV_CODES = {
+    "ABC", "ACCN", "BTN", "CBS", "CBSSN", "CW", "ESPN", "ESPN2", "ESPND", "ESPNEWS",
+    "ESPNU", "FOX", "FS1", "FS2", "GOLF", "MLBN", "NBATV", "NBC", "NBCSN", "NFLN",
+    "NHLN", "SECN", "SPORTSNET", "TBS", "TNT", "TRUTV", "USA",
+}
+_NETWORK_STREAMING_CODES = {
+    "ACCNX", "APPLETV", "BTN+", "DISNEY+", "ESPN+", "ESPNUNLMTD", "FLOSPORTS",
+    "MLBTV", "MW+", "NETFLIX", "PARAMOUNT+", "PEACOCK", "PRIME", "SECN+", "YOUTUBE",
+}
+_NETWORK_CODES = _NETWORK_TV_CODES | _NETWORK_STREAMING_CODES
+
+# Common alternate spellings for the same network (a provider's raw channel name, or
+# an older un-split `broadcast` string), keyed by the ALREADY-NORMALIZED form (see
+# _normalize_network_token: uppercased, everything but letters/digits/+ stripped) ->
+# canonical code. A code already spelled canonically (e.g. "ABC", "ESPN2") needs no
+# entry here — normalizing it is already a no-op that equals the code itself.
+_NETWORK_NAME_ALIASES = {
+    "ACCNETWORK": "ACCN",
+    "ACCNETWORKEXTRA": "ACCNX", "ACCNEXTRA": "ACCNX",
+    "BIGTENNETWORK": "BTN",
+    "BIGTENNETWORKPLUS": "BTN+", "BTNPLUS": "BTN+", "B1G+": "BTN+", "B1GPLUS": "BTN+",
+    "SECNETWORK": "SECN", "SECNET": "SECN",
+    "SECNETWORKPLUS": "SECN+", "SECNETWORK+": "SECN+", "SECNPLUS": "SECN+",
+    "ESPNDEPORTES": "ESPND",
+    "ESPNPLUS": "ESPN+",
+    "ESPNUNLIMITED": "ESPNUNLMTD",
+    "GOLFCHANNEL": "GOLF", "GOLFCHNL": "GOLF",
+    "NHLNETWORK": "NHLN", "NHLNET": "NHLN",
+    "NFLNETWORK": "NFLN", "NFLNET": "NFLN",
+    "MLBNETWORK": "MLBN", "MLBNET": "MLBN",
+    "USANETWORK": "USA", "USANET": "USA",
+    "CBSSPORTSNETWORK": "CBSSN",
+    "FOXSPORTS1": "FS1",
+    "FOXSPORTS2": "FS2",
+    "PARAMOUNTPLUS": "PARAMOUNT+",
+    "APPLETVPLUS": "APPLETV", "APPLETV+": "APPLETV",
+    "MOUNTAINWESTPLUS": "MW+", "MOUNTAINWESTNETWORKPLUS": "MW+", "MWPLUS": "MW+",
+    "DISNEYPLUS": "DISNEY+",
+    "MLBDOTTV": "MLBTV",
+}
+_NETWORK_SPLIT_RE = re.compile(r"[:|]")
+
+
+def _normalize_network_token(text):
+    """Normalize a network name/code fragment — from a provider's own channel name, or
+    a comma-separated `broadcast` string — into a canonical code for comparison against
+    _NETWORK_CODES / SDP's broadcast_networks[].code. Best-effort: an unrecognized
+    fragment is returned as its stripped/uppercased self rather than dropped, matching
+    SDP's own "keep unknowns" behavior for broadcast_networks."""
+    stripped = re.sub(r"[^A-Za-z0-9+]", "", text or "").upper()
+    return _NETWORK_NAME_ALIASES.get(stripped, stripped)
+
+
 # Leagues whose logo URL should be built from the full team-name slug instead of the
 # feed's abbreviation (see _build_sdp_template_vars).
 _LOGO_NAME_SLUG_LEAGUES = {"ncaaf", "ncaa-football"}
 
-# The schedule feed's ESPN+ "watch" rows (ingest_source "espn_watch") list away/home in the
-# REVERSE order of the real scoreboard row for US leagues (measured against the same games:
-# ncaa-football 61/61 reversed, nhl 35/37) but not for soccer (laliga/usl/eredivisie all
-# same). For a game that only exists as a watch row that produced "Home @ Away" names and
-# logos. Leagues are detected from the feed itself (enough paired rows, mostly reversed);
-# this fixed set is the fallback when a league has too few pairs to measure.
-_WATCH_ROWS_REVERSED_FALLBACK = {"nhl", "ncaa-football"}
+# espn_watch rows used to list away/home in REVERSE order of the real scoreboard row for
+# some US leagues (measured: ncaa-football 61/61 reversed, nhl 35/37, ncaa-womens-volleyball
+# 400/409) but not for soccer (laliga/usl/eredivisie all same). SDP fixed this at the source
+# (commit 3c6e2ca, deployed and verified live) for ncaa-football, nhl and ncaa-womens-volleyball,
+# so orientation is now detected purely from paired watch/scoreboard rows in the feed itself —
+# no hard-coded fallback needed. Leagues with no scoreboard twin to measure against (college
+# soccer, field hockey, etc.) are simply left unswapped, as before.
 _WATCH_SWAP_FIELDS = ("team_name", "team_abbr", "team_short_name", "team_id", "team_logo_url", "record", "score")
 
 # Providers and ESPN spell the same school differently ("Southeastern Louisiana" vs "SE
@@ -501,6 +581,14 @@ _TEAM_TOKEN_ALIAS_PAIRS = [
     ("tenn", "tennessee"), ("fla", "florida"), ("ga", "georgia"), ("ala", "alabama"), ("ky", "kentucky"),
     ("st", "state"), ("st", "saint"), ("univ", "university"), ("intl", "international"),
     ("central", "cent"), ("eastern", "east"), ("western", "west"), ("southern", "south"), ("northern", "north"),
+    # Full official school names providers use vs the short forms ESPN publishes.
+    ("appalachian", "app"), ("mississippi", "ole miss"), ("brigham young", "byu"),
+    ("southern methodist", "smu"), ("texas christian", "tcu"), ("louisiana state", "lsu"),
+    ("central florida", "ucf"), ("north carolina state", "nc state"), ("florida international", "fiu"),
+    ("florida atlantic", "fau"), ("nevada las vegas", "unlv"), ("virginia commonwealth", "vcu"),
+    ("alabama birmingham", "uab"), ("texas el paso", "utep"), ("texas san antonio", "utsa"),
+    ("southern california", "usc"), ("louisiana monroe", "ul monroe"), ("louisiana lafayette", "louisiana"),
+    ("connecticut", "uconn"), ("massachusetts", "umass"),
 ]
 _TEAM_TOKEN_ALIASES = {}
 for _a, _b in _TEAM_TOKEN_ALIAS_PAIRS:
@@ -539,12 +627,13 @@ def _alias_variants(tokens):
                             seen.add(v)
                             out.append(v)
                             nxt.append(v)
-            if len(seq) > 1 and seq[-1] == "state" and seq[:-1] not in seen:
-                seen.add(seq[:-1])
-                out.append(seq[:-1])
         frontier = nxt
         if len(out) >= _TEAM_ALIAS_MAX_VARIANTS:
             break
+    # "State" is dropped from the name AS WRITTEN only — never from an already-aliased
+    # variant, or "Mississippi State" would chain (drop State -> Mississippi -> Ole Miss).
+    if len(tokens) > 1 and tokens[-1] == "state" and tokens[:-1] not in seen:
+        out.append(tokens[:-1])
     return tuple(out[:_TEAM_ALIAS_MAX_VARIANTS])
 
 # ── Per-side matchup cleanup ────────────────────────────────────────────────
@@ -716,7 +805,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.4.08"
+    version = "0.4.09"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -976,14 +1065,19 @@ class Plugin:
                     "type": "select",
                     "default": "none",
                     "options": (
-                        [{"value": "none", "label": "(none — regex rules only)"}]
+                        [{"value": "none", "label": "(none — regex rules only)"},
+                         {"value": _ANY_SPORT_VALUE, "label": _ANY_SPORT_LABEL}]
                         + [{"value": k, "label": v} for k, v in _SPORT_TEMPLATES.items()]
                     ),
                     "help_text": (
                         "When set, auto-created channels are matched against live schedule data "
                         "(sports-data-platform) and renamed/EPG-generated from that sport's "
                         "templates (configured further down). When a channel can't be matched to "
-                        "a real game, the Rename Rules below still apply as a fallback."
+                        "a real game, the Rename Rules below still apply as a fallback. Pick a "
+                        "specific league for team-matchup channels (\"Chiefs @ Bills\"); pick "
+                        f"\"{_ANY_SPORT_LABEL}\" for channels named after a broadcast network "
+                        "instead of two teams (a bare \"ESPN2\", or a numbered feed like \"NCAAF "
+                        "06: ABC\") — those are matched by network across every sport instead."
                     ),
                 },
                 {
@@ -1229,7 +1323,16 @@ class Plugin:
                     "afterward, to the swapped values). Useful when a source publishes "
                     "a generic title (e.g. 'College Football') with the real matchup "
                     "in the sub-title and you want them the other way around.\n"
-                    "  Example: swap_subtitle::^College Football$::"
+                    "  Example: swap_subtitle::^College Football$::\n"
+                    "  swap_description::PATTERN::[EXTRACT_REGEX]\n"
+                    "For sources with NO sub-title where the real matchup is the FIRST LINE of "
+                    "the description (e.g. iptv-epg.org): when the title matches PATTERN, the "
+                    "description's first line becomes the new Title, the old title becomes the "
+                    "Sub-Title, and the rest stays as the Description. Optional EXTRACT_REGEX "
+                    "(first group = the new title) replaces 'first line' when the matchup isn't "
+                    "on its own line.\n"
+                    "  Example: swap_description::College Football::\n"
+                    "Use Preview Rule Changes to see which titles matched and why a rule skipped some."
                 ),
             }
         ]
@@ -1562,9 +1665,80 @@ class Plugin:
                     })
                 except re.error as e:
                     LOGGER.warning(f"EPG & Sports Editor: bad regex '{arg1}': {e}")
+            elif kind == "swap_description":
+                # swap_description::TITLE_PATTERN::[EXTRACT_REGEX]  (see _apply_cross_field_rules)
+                try:
+                    rules.append({
+                        "type": "swap_description",
+                        "pattern": re.compile(arg1),
+                        "extract": re.compile(arg2, re.DOTALL) if arg2.strip() else None,
+                        "raw": arg1,
+                        "raw_extract": arg2,
+                    })
+                except re.error as e:
+                    LOGGER.warning(f"EPG & Sports Editor: bad regex in swap_description '{arg1}'/'{arg2}': {e}")
             else:
                 LOGGER.warning(f"EPG & Sports Editor: unknown rule type '{kind}' — skipping")
         return rules
+
+    @staticmethod
+    def _extract_title_from_description(description, extract):
+        """(new_title, remaining_description) for a swap_description rule, or (None, description).
+
+        With no EXTRACT regex the title is the FIRST LINE of the description (some sources,
+        e.g. iptv-epg.org, publish "Texas at Tennessee\\nNo. 14 Tennessee hosts…" with no
+        <sub-title> at all). With one, its first capture group (or whole match) is the title
+        and is removed from the description. Refuses an empty result or one over 150
+        characters — that is a paragraph, not a matchup line."""
+        description = description or ""
+        if extract is not None:
+            m = extract.search(description)
+            if not m:
+                return None, description
+            text = (m.group(1) if m.groups() else m.group(0)) or ""
+            rest = (description[:m.start()] + description[m.end():]).strip()
+        else:
+            if "\n" not in description.strip():
+                return None, description
+            text, rest = description.strip().split("\n", 1)
+            rest = rest.strip()
+        text = " ".join(text.split())
+        if not text or len(text) > 150:
+            return None, description
+        return text, rest
+
+    def _apply_cross_field_rules(self, title, sub_title, description, title_rules):
+        """Rules that move text BETWEEN fields (the per-field rules can't see across fields).
+
+        Returns (title, sub_title, description, outcome) where outcome maps the rule kind to
+        what happened, so Preview can explain a rule that did nothing. At most one fires:
+          swap_subtitle::PATTERN::            title <-> sub-title (skipped if sub-title empty)
+          swap_description::PATTERN::[REGEX]  new title = first line of the description (or
+                                              REGEX's first group); old title becomes the
+                                              sub-title if it had none; the rest stays as the
+                                              description
+        Both run before the ordinary regex/replace rules, which then apply to the new values."""
+        outcome = {}
+        if not title or not title_rules:
+            return title, sub_title, description, outcome
+        for rule in title_rules:
+            if rule["type"] == "swap_subtitle" and rule["pattern"].search(title):
+                if sub_title:
+                    outcome["swap_subtitle"] = "swapped"
+                    return sub_title, title, description, outcome
+                outcome["swap_subtitle"] = "empty_sub"
+        for rule in title_rules:
+            if rule["type"] == "swap_description" and rule["pattern"].search(title):
+                if not description:
+                    outcome["swap_description"] = "no_description"
+                    continue
+                new_title, rest = self._extract_title_from_description(description, rule["extract"])
+                if not new_title:
+                    outcome["swap_description"] = "no_match"
+                    continue
+                outcome["swap_description"] = "applied"
+                return new_title, (sub_title or title), (rest or description), outcome
+        return title, sub_title, description, outcome
 
     def _apply_rules(self, value, rules):
         if not value or not rules:
@@ -1701,7 +1875,9 @@ class Plugin:
     @staticmethod
     def _normalize_watch_orientation(events):
         """Swap away/home on espn_watch rows for leagues whose watch rows are measurably
-        reversed vs the real scoreboard rows (see _WATCH_ROWS_REVERSED_FALLBACK)."""
+        reversed vs the real scoreboard rows, detected per-league from paired watch/main
+        rows in the feed (>= 3 pairs, reversed >= 3x same). Leagues with too few pairs to
+        measure are left as-is."""
         import re
         from datetime import datetime
 
@@ -1740,14 +1916,8 @@ class Plugin:
                 league[1] += 1          # same orientation
         reversed_leagues = set()
         for league, (rev, same) in votes.items():
-            if rev + same >= 3:
-                if rev >= 3 * max(same, 1) or (same == 0 and rev >= 3):
-                    reversed_leagues.add(league)
-                elif same >= rev:
-                    continue
-            elif league in _WATCH_ROWS_REVERSED_FALLBACK:
+            if rev + same >= 3 and (rev >= 3 * max(same, 1) or (same == 0 and rev >= 3)):
                 reversed_leagues.add(league)
-        reversed_leagues |= {lg for lg in _WATCH_ROWS_REVERSED_FALLBACK if lg not in votes or votes[lg][0] + votes[lg][1] < 3}
         for ev in events:
             if (ev.get("ingest_source") == "espn_watch" and ev.get("league_slug") in reversed_leagues
                     and ev.get("away_team_name") and ev.get("home_team_name")):
@@ -1831,6 +2001,29 @@ class Plugin:
         if strip_noise:
             away, home = _clean_matchup_side(away, "away"), _clean_matchup_side(home, "home")
         return away, home
+
+    @staticmethod
+    def _extract_network_code(channel_name):
+        """Find a known broadcast network embedded in a raw channel name — "ABC" in
+        "NCAAF 06: ABC", or "SEC Network" in "USA | SEC Network" — for Network Channel
+        matching (see _find_sdp_event_by_network). Tries ":"/"|"-delimited fragments
+        first, checked from the END of the name backward, since a provider's own
+        network tag is conventionally listed last, after any numeric feed-slot/league
+        prefix. Falls back to short word n-grams (also from the end) for names with no
+        such delimiter, e.g. a bare "ESPN2 HD". Returns a canonical code or None."""
+        name = channel_name or ""
+        fragments = [f.strip() for f in _NETWORK_SPLIT_RE.split(name) if f.strip()]
+        for frag in reversed(fragments):
+            code = _normalize_network_token(frag)
+            if code in _NETWORK_CODES:
+                return code
+        words = name.split()
+        for n in (2, 1):
+            for i in range(len(words) - n, -1, -1):
+                code = _normalize_network_token(" ".join(words[i:i + n]))
+                if code in _NETWORK_CODES:
+                    return code
+        return None
 
     @staticmethod
     def _team_match_score(text, *candidates):
@@ -1946,10 +2139,15 @@ class Plugin:
                 continue
 
             # ESPN+ "watch" rows are often studio/replay programming whose "team" is a
-            # show title ("SEC Inside: Auburn", "SEC Storied: ...") — real team names
-            # never contain a colon, and a partial-name hit on one of these would
-            # rename a channel to a TV show instead of the game.
-            if ":" in (ev.get("away_team_name") or "") or ":" in (ev.get("home_team_name") or ""):
+            # show title ("SEC Inside: Auburn", "SEC Storied: ...") — a partial-name hit
+            # on one of these would rename a channel to a TV show instead of the game.
+            # SDP now tags these explicitly as event_type "program"; fall back to the
+            # colon heuristic (real team names never contain a colon) for any cached
+            # events fetched before that field existed.
+            event_type = ev.get("event_type")
+            if event_type == "program":
+                continue
+            if event_type is None and (":" in (ev.get("away_team_name") or "") or ":" in (ev.get("home_team_name") or "")):
                 continue
 
             ev_away = (ev.get("away_team_name"), ev.get("away_team_abbr"), ev.get("away_team_short_name"))
@@ -2132,6 +2330,75 @@ class Plugin:
                 best_score, best_event = combined, ev
 
         return best_event if best_score >= 0.55 else None
+
+    @staticmethod
+    def _event_has_network(event, network_code):
+        """True if `event` is broadcast on `network_code` (a canonical code — see
+        _NETWORK_CODES). Prefers SDP's structured `broadcast_networks` field when
+        present; falls back to parsing the legacy comma-joined `broadcast` string the
+        same way, for events fetched/cached before SDP added that field."""
+        networks = event.get("broadcast_networks")
+        if networks:
+            return any(
+                _normalize_network_token(n.get("code") or n.get("name") or "") == network_code
+                for n in networks if isinstance(n, dict)
+            )
+        broadcast = event.get("broadcast") or ""
+        return any(_normalize_network_token(part) == network_code for part in broadcast.split(","))
+
+    def _find_sdp_event_by_network(self, network_code, league_slug, events):
+        """Match a "Network Channel" (names a broadcast network instead of two teams —
+        a bare "ESPN2", or a provider's numbered regional-feed slot like "NCAAF 06: ABC")
+        against the SDP event currently/soon airing on that network. `league_slug`
+        restricts candidates to one sport's events as usual, or pass _ANY_SPORT_VALUE to
+        search every sport — for a channel that's just a network and could carry any
+        sport during the day, as opposed to a network channel inside a specific-league
+        group (which only ever shows that league's games on that network).
+
+        Prefers an event live right now; otherwise the one closest to now within the
+        window (soonest upcoming, or most recently started). A real tie — two
+        simultaneous games on the same network, common for ABC/CBS regional Saturday
+        windows — can't be told apart from SDP's data (it doesn't carry regional-feed
+        assignment), so a genuine tie is left unmatched rather than guessed at."""
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(hours=20)
+        window_end = now + timedelta(days=10)
+
+        candidates = []
+        for ev in events:
+            if league_slug != _ANY_SPORT_VALUE:
+                if ev.get("league_slug") not in _SPORT_SLUG_POOL.get(league_slug, (league_slug,)):
+                    continue
+            if ev.get("event_type") == "program":
+                continue        # ESPN+ studio/replay rows, not a real game on this network
+            raw_start = ev.get("start_time_utc")
+            if not raw_start:
+                continue
+            try:
+                start = datetime.fromisoformat(raw_start.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if start < window_start or start > window_end:
+                continue
+            if not self._event_has_network(ev, network_code):
+                continue
+            candidates.append((ev, start))
+
+        if not candidates:
+            return None
+
+        def rank_key(item):
+            ev, start = item
+            duration_hours = _LEAGUE_DURATION_HOURS.get(ev.get("league_slug"), 3.0)
+            live = start <= now <= start + timedelta(hours=duration_hours)
+            return (live, -abs((start - now).total_seconds()))
+
+        ranked = [(rank_key(c), c) for c in candidates]
+        best_rank = max(r for r, _ in ranked)
+        tied = [c for r, c in ranked if r == best_rank]
+        return tied[0][0] if len(tied) == 1 else None
 
     @staticmethod
     def _slugify_team(text):
@@ -2373,14 +2640,14 @@ class Plugin:
 
     def _enabled_sport_template_groups(self, settings):
         """Return [(ChannelGroup, sport_slug), ...] for every group with the Sports
-        Editor enabled AND a Sport Template selected."""
+        Editor enabled AND a Sport Template (or Any Sport / Network Channel) selected."""
         from apps.channels.models import ChannelGroup
         result = []
         for group in ChannelGroup.objects.all().order_by("name"):
             if not settings.get(f"sports_editor_{group.id}_enabled"):
                 continue
             sport = (settings.get(f"sports_editor_{group.id}_sport") or "").strip()
-            if sport in _SPORT_TEMPLATES:
+            if sport in _SPORT_TEMPLATES or sport == _ANY_SPORT_VALUE:
                 result.append((group, sport))
         return result
 
@@ -2399,23 +2666,47 @@ class Plugin:
         # see _extract_feed_tag / _TRAILING_FEED_DATETIME_RE.
         feed_tag = self._extract_feed_tag(ch.name) if strip_noise else ""
 
-        if mode == "single_title":
+        event = None
+        if sport_slug == _ANY_SPORT_VALUE:
+            # "Any Sport" groups are for channels that are just a network (a bare
+            # "ESPN2" or "ABC"), not tied to one league — see _find_sdp_event_by_network.
+            network_code = self._extract_network_code(ch.name)
+            if network_code:
+                event = self._find_sdp_event_by_network(network_code, sport_slug, events)
+        elif mode == "single_title":
             title_text = self._strip_provider_noise(ch.name)
             if not title_text:
                 return False
             event = self._find_sdp_event_single_title(title_text, sport_slug, events)
         else:
             matchup = self._extract_matchup_teams(ch.name, strip_noise=strip_noise)
-            if not matchup:
-                return False
-            away_text, home_text = matchup
-            # _person_name_score only kicks in its "Last, First" flip when a comma
-            # is actually present, so it's a strict superset of _team_match_score —
-            # safe default for every person-vs-person (rather than team-vs-team)
-            # sport, not just tennis.
-            score_fn = self._person_name_score if sport_slug in _PERSON_VS_PERSON_SPORTS else None
-            event = self._find_sdp_event(away_text, home_text, sport_slug, events, score_fn=score_fn)
+            if matchup:
+                away_text, home_text = matchup
+                # _person_name_score only kicks in its "Last, First" flip when a comma
+                # is actually present, so it's a strict superset of _team_match_score —
+                # safe default for every person-vs-person (rather than team-vs-team)
+                # sport, not just tennis.
+                score_fn = self._person_name_score if sport_slug in _PERSON_VS_PERSON_SPORTS else None
+                event = self._find_sdp_event(away_text, home_text, sport_slug, events, score_fn=score_fn)
+            else:
+                # No "Team @ Team" shape at all (e.g. "NCAAF 06: ABC") — likely a
+                # provider's numbered network-affiliate channel rather than a per-game
+                # one. Try matching it by network instead, still scoped to this
+                # group's league.
+                network_code = self._extract_network_code(ch.name)
+                if network_code:
+                    event = self._find_sdp_event_by_network(network_code, sport_slug, events)
         if not event:
+            return False
+
+        # A Network Channel match can land on any league (an "Any Sport" group has no
+        # fixed one, and even a league-scoped group's network match could technically
+        # span the pooled slugs in _SPORT_SLUG_POOL) — use the MATCHED event's own
+        # league for templates/duration/label from here on, not the group's setting.
+        template_slug = event.get("league_slug") if sport_slug == _ANY_SPORT_VALUE else sport_slug
+        if template_slug not in _SPORT_TEMPLATES:
+            # Matched to a league SDP added after this plugin's _SPORT_TEMPLATES list
+            # (or one with no scoreboard slug at all) — nothing to render it with.
             return False
 
         # A game whose entire Pregame/Live/Postgame window has already elapsed is
@@ -2423,7 +2714,7 @@ class Plugin:
         # are already 100% in the past by the time anyone looks at the guide. Treat
         # it as no match so the group's Rename Rules fallback (or no-op) applies instead.
         start = datetime.fromisoformat(event["start_time_utc"].replace("Z", "+00:00"))
-        duration_hours = _LEAGUE_DURATION_HOURS.get(sport_slug, 3.0)
+        duration_hours = _LEAGUE_DURATION_HOURS.get(template_slug, 3.0)
         est_end = start + timedelta(hours=duration_hours)
         # Pregame defaults to "all day" (from midnight on game day) rather than just an
         # hour before — a channel dedicated to one game should show as "pregame" all
@@ -2436,13 +2727,13 @@ class Plugin:
 
         gamethumbs_base = settings.get("sports_editor_gamethumbs_url") or "https://game-thumbs.tickarr.com"
         display_tz = settings.get("sports_editor_display_tz") or ""
-        league_label = _SPORT_TEMPLATES.get(sport_slug, sport_slug)
-        defaults = self._sport_default_templates(sport_slug)
+        league_label = _SPORT_TEMPLATES.get(template_slug, template_slug)
+        defaults = self._sport_default_templates(template_slug)
         vars_base = self._build_sdp_template_vars(
             event, gamethumbs_base, league_label, "pregame", feed_tag=feed_tag, display_tz=display_tz
         )
 
-        channel_name_tpl = settings.get(f"sport_tpl_{sport_slug}_channel_name") or defaults["channel_name"]
+        channel_name_tpl = settings.get(f"sport_tpl_{template_slug}_channel_name") or defaults["channel_name"]
         new_name = self._render_sports_template(channel_name_tpl, vars_base)
         if new_name and new_name != ch.name:
             ch.name = new_name
@@ -2477,10 +2768,10 @@ class Plugin:
                 event, gamethumbs_base, league_label, phase, feed_tag=feed_tag, display_tz=display_tz
             )
             title = self._render_sports_template(
-                settings.get(f"sport_tpl_{sport_slug}_{title_key}") or default_title, v
+                settings.get(f"sport_tpl_{template_slug}_{title_key}") or default_title, v
             )
             desc = self._render_sports_template(
-                settings.get(f"sport_tpl_{sport_slug}_{desc_key}") or default_desc, v
+                settings.get(f"sport_tpl_{template_slug}_{desc_key}") or default_desc, v
             )
             batch.append(ProgramData(
                 epg=epg_entry, start_time=b_start, end_time=b_end,
@@ -2496,7 +2787,7 @@ class Plugin:
         # which lacks any field the user never saved, so a bare "" default left the
         # stream's own logo in place until the manual action (which receives
         # defaults-merged settings) ran.
-        logo_url_tpl = settings.get(f"sport_tpl_{sport_slug}_logo_url") or defaults["logo_url"]
+        logo_url_tpl = settings.get(f"sport_tpl_{template_slug}_logo_url") or defaults["logo_url"]
         logo_url = self._render_sports_template(logo_url_tpl, vars_base)
         if logo_url:
             logo_obj, _ = Logo.objects.get_or_create(url=logo_url, defaults={"name": ch.name})
@@ -2584,8 +2875,9 @@ class Plugin:
                         LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
                 total_scanned += len(channels)
                 total_matched += group_matched
+                sport_label = _SPORT_TEMPLATES.get(sport) or (_ANY_SPORT_LABEL if sport == _ANY_SPORT_VALUE else sport)
                 lines.append(
-                    f"{group.name} ({_SPORT_TEMPLATES.get(sport, sport)}): "
+                    f"{group.name} ({sport_label}): "
                     f"scanned {len(channels)}, matched {group_matched}"
                 )
                 lines.extend(examples)
@@ -2624,6 +2916,12 @@ class Plugin:
                         descs.append(f"regex({r['raw']!r} → {r['replacement']!r})")
                     elif r["type"] == "replace":
                         descs.append(f"replace({r['find']!r} → {r['replacement']!r})")
+                    elif r["type"] == "swap_description":
+                        descs.append(
+                            f"swap_description({r['raw']!r}"
+                            + (f", extract {r['raw_extract']!r}" if r.get("raw_extract") else ", first line")
+                            + ")"
+                        )
                     else:
                         descs.append(f"swap_subtitle({r['raw']!r})")
                 lines.append(f"    {label}: " + ", ".join(descs))
@@ -2797,16 +3095,12 @@ class Plugin:
                         custom_props["season"] = prog.start_time.year
                         custom_props["episode"] = prog.start_time.timetuple().tm_yday
 
-                    # swap_subtitle runs before the normal per-field rules below, so
-                    # those still get a chance to clean up the swapped values. Only
-                    # swap when there's a non-empty sub_title to swap in, otherwise
-                    # the title would go blank.
-                    title_src, subtitle_src = prog.title, prog.sub_title
-                    if prog.sub_title and prog.title and any(
-                        r["type"] == "swap_subtitle" and r["pattern"].search(prog.title)
-                        for r in field_rules["title"]
-                    ):
-                        title_src, subtitle_src = prog.sub_title, prog.title
+                    # swap_subtitle / swap_description run before the normal per-field
+                    # rules below, so those still get a chance to clean up the moved
+                    # values (see _apply_cross_field_rules for when each one fires).
+                    title_src, subtitle_src, desc_src, _ = self._apply_cross_field_rules(
+                        prog.title, prog.sub_title, prog.description, field_rules["title"]
+                    )
 
                     batch.append(ProgramData(
                         epg=ve,
@@ -2818,8 +3112,8 @@ class Plugin:
                             if subtitle_src is not None else None
                         ),
                         description=(
-                            self._apply_rules(prog.description, field_rules["description"])
-                            if prog.description is not None else None
+                            self._apply_rules(desc_src, field_rules["description"])
+                            if desc_src is not None else None
                         ),
                         tvg_id=prog.tvg_id,
                         custom_properties=custom_props,
@@ -3018,21 +3312,44 @@ class Plugin:
             counts = {"title": 0, "sub_title": 0, "description": 0}
             examples = []
             scanned = 0
+            # swap_subtitle needs Title AND Sub-Title together, so the per-field loop below can
+            # never see it (a plain preview always reported "0 changes"). Mirror what the real
+            # transform does — swap first, then run the ordinary rules on the swapped values —
+            # and keep counts that explain WHY a swap rule did nothing.
+            swap_sub_rules = [r for r in field_rules["title"] if r["type"] == "swap_subtitle"]
+            swap_desc_rules = [r for r in field_rules["title"] if r["type"] == "swap_description"]
+            swap_stats = {"swap_subtitle": collections.Counter(), "swap_description": collections.Counter()}
+            title_seen = {}
+            empty_sub_with_desc_lines = 0
 
             for prog in ProgramData.objects.filter(
                 epg__epg_source=source
-            ).select_related("epg")[:2000]:
+            ).select_related("epg")[:PREVIEW_MAX_PROGRAMS]:
                 scanned += 1
+                title_seen[prog.title] = title_seen.get(prog.title, 0) + 1
+                title_src, sub_src, desc_src, outcome = self._apply_cross_field_rules(
+                    prog.title, prog.sub_title, prog.description, field_rules["title"]
+                )
+                for kind, what in outcome.items():
+                    swap_stats[kind][what] += 1
+                if outcome.get("swap_subtitle") == "empty_sub" and "\n" in (prog.description or "").strip():
+                    empty_sub_with_desc_lines += 1
+                moved = bool(outcome) and any(v in ("swapped", "applied") for v in outcome.values())
                 for field_name, rules in field_rules.items():
-                    if not rules:
+                    if not rules and not moved:
                         continue
-                    original = getattr(prog, field_name) or ""
-                    transformed = self._apply_rules(original, rules)
+                    if field_name == "title":
+                        original, source_value = prog.title or "", title_src or ""
+                    elif field_name == "sub_title":
+                        original, source_value = prog.sub_title or "", sub_src or ""
+                    else:
+                        original, source_value = prog.description or "", desc_src or ""
+                    transformed = self._apply_rules(source_value, rules) if rules else source_value
                     if transformed != original:
                         counts[field_name] += 1
                         if len(examples) < 10:
                             examples.append(
-                                f"  [{field_name}] {prog.epg.name}\n"
+                                f"  [{field_name}]{' (moved by a swap rule)' if moved else ''} {prog.epg.name}\n"
                                 f"    BEFORE: {original[:100]}\n"
                                 f"     AFTER: {transformed[:100]}"
                             )
@@ -3041,6 +3358,45 @@ class Plugin:
             for field_name, count in counts.items():
                 if field_rules[field_name]:
                     all_lines.append(f"  {field_name}: {count} program(s) would change")
+            common = sorted(title_seen.items(), key=lambda kv: -kv[1])[:6]
+            common_txt = ", ".join(f"{t!r} x{n}" for t, n in common)
+            if swap_sub_rules:
+                st = swap_stats["swap_subtitle"]
+                all_lines.append(
+                    f"  swap_subtitle: {st['swapped'] + st['empty_sub']} title(s) matched the pattern — "
+                    f"{st['swapped']} would be swapped, {st['empty_sub']} skipped because their "
+                    f"Sub-Title is empty (nothing to swap in)"
+                )
+                if st["swapped"] + st["empty_sub"] == 0:
+                    all_lines.append(
+                        "  ⚠ No program title matched the swap_subtitle pattern. A pattern with ^ and $ must "
+                        "match the WHOLE title (a trailing space or extra words prevents it) — try removing "
+                        "the anchors, e.g. swap_subtitle::College Football::. Most common titles in this "
+                        "source (quoted so spaces are visible): " + common_txt
+                    )
+                elif st["swapped"] == 0 and st["empty_sub"] > 0:
+                    hint = (
+                        f" {empty_sub_with_desc_lines} of them have the matchup on the FIRST LINE OF THE "
+                        f"DESCRIPTION — use swap_description::PATTERN:: instead (it takes the description's "
+                        f"first line as the new title)." if empty_sub_with_desc_lines else ""
+                    )
+                    all_lines.append(
+                        "  ⚠ Every matching program has an empty Sub-Title, so swap_subtitle can never swap "
+                        "this source (its Sub-Title is not populated)." + hint
+                    )
+            if swap_desc_rules:
+                sd = swap_stats["swap_description"]
+                matched = sum(sd.values())
+                all_lines.append(
+                    f"  swap_description: {matched} title(s) matched the pattern — {sd['applied']} would get a "
+                    f"new title from their description, {sd['no_description']} skipped (no description), "
+                    f"{sd['no_match']} skipped (no usable first line / extract regex found nothing)"
+                )
+                if matched == 0:
+                    all_lines.append(
+                        "  ⚠ No program title matched the swap_description pattern. Most common titles in "
+                        "this source (quoted so spaces are visible): " + common_txt
+                    )
             if examples:
                 all_lines.append("")
                 all_lines.extend(examples)
