@@ -455,13 +455,20 @@ _TRAILING_CHANNEL_TAG_RE = re.compile(r'\s*:\s*[A-Za-z][A-Za-z ]{1,20}\d{1,4}\s*
 # parsing; the optional feed word is captured separately by _extract_feed_tag
 # so it isn't lost, just moved out of the matchup text.
 _FEED_TAG_WORDS_RE_FRAG = r'HOME|AWAY|NATIONAL'
+# Some providers put a literal "@" between the feed tag and the date ("HOME @ 27
+# Sep 01:05 PM ET") instead of a plain space ("HOME 23 Aug 01:35 PM ET"). Both
+# regexes below tolerate an optional "@ " connector so either shape is caught as
+# one unit — without it, the "@ <date>" tail alone got stripped by a different
+# regex (_TRAILING_AT_DATE_RE) but left the feed word dangling on the team text,
+# and _extract_feed_tag/{feed_line} silently came back empty.
+_FEED_TAG_DATE_CONNECTOR_RE_FRAG = r'(?:@\s+)?'
 _TRAILING_FEED_DATETIME_RE = re.compile(
-    rf'\s+(?:(?:{_FEED_TAG_WORDS_RE_FRAG})\s+)?'
+    rf'\s+(?:(?:{_FEED_TAG_WORDS_RE_FRAG})\s+)?{_FEED_TAG_DATE_CONNECTOR_RE_FRAG}'
     rf'\d{{1,2}}\s+{_MONTHS_RE_FRAG}\s+\d{{1,2}}:\d{{2}}\s*(?:AM|PM)\s*(?:ET|CT|MT|PT)?\s*$',
     re.IGNORECASE,
 )
 _TRAILING_FEED_TAG_ONLY_RE = re.compile(
-    rf'(?P<feed>{_FEED_TAG_WORDS_RE_FRAG})(?=\s+\d{{1,2}}\s+{_MONTHS_RE_FRAG}\s+\d{{1,2}}:\d{{2}})',
+    rf'(?P<feed>{_FEED_TAG_WORDS_RE_FRAG})(?=\s+{_FEED_TAG_DATE_CONNECTOR_RE_FRAG}\d{{1,2}}\s+{_MONTHS_RE_FRAG}\s+\d{{1,2}}:\d{{2}})',
     re.IGNORECASE,
 )
 # "TSN+ | Event 1 | 7:45AM PGA TOUR Live: ..." -- no digit before the first "|" so
@@ -805,7 +812,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.00"
+    version = "0.5.01"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -2011,17 +2018,34 @@ class Plugin:
         network tag is conventionally listed last, after any numeric feed-slot/league
         prefix. Falls back to short word n-grams (also from the end) for names with no
         such delimiter, e.g. a bare "ESPN2 HD". Returns a canonical code or None."""
+        def try_code(frag):
+            code = _normalize_network_token(frag)
+            if code in _NETWORK_CODES:
+                return code
+            # A provider's own regional-feed number ("BIG TEN NETWORK 2", for a
+            # second numbered feed of the same network) isn't a distinct network in
+            # SDP's data -- confirmed SDP only carries plain "BTN"/"BTN+", no "BTN2".
+            # Retry without a trailing standalone number. Codes that already end in a
+            # digit with no preceding space ("ESPN2", "FS1") are untouched by this,
+            # since the regex requires whitespace before the digit(s).
+            stripped = re.sub(r"\s+\d+$", "", frag)
+            if stripped != frag:
+                code = _normalize_network_token(stripped)
+                if code in _NETWORK_CODES:
+                    return code
+            return None
+
         name = channel_name or ""
         fragments = [f.strip() for f in _NETWORK_SPLIT_RE.split(name) if f.strip()]
         for frag in reversed(fragments):
-            code = _normalize_network_token(frag)
-            if code in _NETWORK_CODES:
+            code = try_code(frag)
+            if code:
                 return code
         words = name.split()
         for n in (2, 1):
             for i in range(len(words) - n, -1, -1):
-                code = _normalize_network_token(" ".join(words[i:i + n]))
-                if code in _NETWORK_CODES:
+                code = try_code(" ".join(words[i:i + n]))
+                if code:
                     return code
         return None
 
