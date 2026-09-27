@@ -329,6 +329,7 @@ One section appears per Dispatcharr channel group. Per-group settings:
 | **Enable Sports Editor for this group** | Toggle the Sports Editor on/off for this channel group |
 | **Sport Template** | Pick a sport (93 supported — see the [full league list](docs/SPORT_TEMPLATES.md#full-league-list)), **Any Sport** for [Network Channels](#network-channels) (channels named after a broadcast network instead of two teams), or none, to match this group's auto-created channels against live game data instead of/alongside rename rules. See the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md)**. |
 | **Sports Channel Rename Rules** | Rules applied to auto-created channel names in this group. Same format as EPG Sources rules above, but a separate rule set per group. Used as a fallback when no Sport Template match is found (or always, if no Sport Template is selected). |
+| **Hide auto-created channels with a past date in their name** | Off by default. For a channel that never matches a real game but whose raw name shows an already-past date/time, hide it (Dispatcharr's `hidden_from_output`, requires Dispatcharr v0.26.0+) instead of leaving it visible. Only ever un-hides a channel this feature itself hid. See the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#hiding-auto-created-channels-with-a-past-date-in-their-name-v0502)**. |
 
 ### Sport Templates
 
@@ -463,6 +464,12 @@ Fixed in v0.5.01. SDP's data only carries one code per network (`BTN`, not a sep
 
 **`{feed_line}` (or the HOME/AWAY/NATIONAL feed tag) renders empty even though the provider clearly splits Home/Away feeds.**
 Fixed in v0.5.01. Some providers put a literal `@` between the feed tag and the date (`... HOME @ 27 Sep 01:05 PM ET`) instead of a plain space (`... HOME 23 Aug 01:35 PM ET`, the shape this was originally built against) — the `@` broke the tag detection, so `{feed_tag}`/`{feed_line}` came back blank. Both shapes now work the same way.
+
+**A channel matched the wrong date — same two teams, but a game days away instead of the one named in the channel's own text.**
+Fixed in v0.5.02. Happens when the same two teams meet more than once in the matching window (a home-and-home, or a best-of playoff series where home/away alternates each game). The tie-break used to let "which row's team order matches the channel text" outrank "which date is closest to right now" — since a series' home/away flips game-to-game, that told us nothing about which date was meant. Time proximity is now checked first.
+
+**Can a stale numbered channel showing yesterday's game be hidden until the provider refreshes it?**
+Yes, as of v0.5.02 — turn on **Hide auto-created channels with a past date in their name** for that group. See [the Settings Reference](#sports-editor) above and the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#hiding-auto-created-channels-with-a-past-date-in-their-name-v0502)** for how it decides and how un-hiding works.
 
 **Where did SiriusXM channel management go?**
 It's been removed from EPG & Sports Editor as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Ticker](https://github.com/jstevenscl/ticker) plugin.

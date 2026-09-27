@@ -185,6 +185,19 @@ def _postgame_hours(settings):
 # How long a stale cache entry stays available as a fetch-failure fallback.
 SDP_CACHE_STALE_TTL_SECS = 24 * 60 * 60
 
+# Tracks which Channel ids the "Hide auto-created channels with a past date in
+# their name" feature has itself hidden (Channel.hidden_from_output=True), kept
+# OUT of PluginConfig.settings for the same reason SDP_CACHE_KEY is (avoids
+# bloating the settings blob Dispatcharr round-trips on every save). A long TTL
+# rather than none: if it's ever evicted, the only loss is the date-based
+# fallback un-hide path (see _apply_past_date_hide) — a channel that gets a real
+# Sport Template match again is always un-hidden regardless of this cache.
+HIDDEN_PAST_CHANNELS_CACHE_KEY = "epg_and_sports_editor_hidden_past_channels"
+HIDDEN_PAST_CHANNELS_CACHE_TTL_SECS = 60 * 24 * 60 * 60
+# Grace period after a channel's embedded date/time before it counts as "past" —
+# absorbs the coarse timezone/DST approximation in _parse_embedded_datetime.
+PAST_CHANNEL_GRACE_HOURS = 4.0
+
 _MATCHUP_SEP_RE = re.compile(r"\s+(?:@|vs\.?|v\.?|at)\s+", re.IGNORECASE)
 
 
@@ -476,6 +489,68 @@ _TRAILING_FEED_TAG_ONLY_RE = re.compile(
 _LEADING_PIPE_EVENT_RE = re.compile(
     r'^[A-Za-z0-9+]{2,10}\s*\|\s*Event\s*\d+\s*\|\s*\d{1,2}(?::\d{2})?(?:AM|PM)\s+', re.IGNORECASE,
 )
+
+# ── Embedded date/time extraction (for "Hide auto-created channels with a past
+# date in their name") ──────────────────────────────────────────────────────────
+# Unlike the noise-stripping regexes above (which only need to find/remove this
+# text), this needs to understand it well enough to build a real datetime — used
+# for a coarse, generously-tolerant past/future check, not for scheduling, so a
+# fixed DST-by-month offset (same approximation as _pregame_start's US Eastern
+# fallback) is good enough. Handles both day-then-month ("27 Sep 01:05 PM ET") and
+# month-then-day ("SEP 27 - 8:50 PM ET") orders, with "-", "-", "@" or plain
+# whitespace between the date and time.
+_DATE_TIME_SEP_RE_FRAG = r'(?:\s*[-–—@]\s*|\s+)'
+_EMBEDDED_DATETIME_RE = re.compile(
+    rf'(?:(?P<day1>\d{{1,2}})\s+(?P<mon1>{_MONTHS_RE_FRAG})|(?P<mon2>{_MONTHS_RE_FRAG})\.?\s+(?P<day2>\d{{1,2}}))'
+    rf'{_DATE_TIME_SEP_RE_FRAG}'
+    rf'(?P<hour>\d{{1,2}}):(?P<minute>\d{{2}})\s*(?P<ampm>[AaPp][Mm])?\s*(?P<tz>ET|CT|MT|PT)?',
+    re.IGNORECASE,
+)
+_MONTH_NUM = {m: i + 1 for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+)}
+# (DST offset, standard offset), matching _pregame_start's month-based approximation.
+_US_TZ_DST_STD_OFFSET_HOURS = {"ET": (-4, -5), "CT": (-5, -6), "MT": (-6, -7), "PT": (-7, -8)}
+
+
+def _parse_embedded_datetime(text):
+    """Best-effort UTC datetime parsed out of a raw provider channel name (e.g.
+    "SEP 27 - 8:50 PM ET" or "27 Sep 01:05 PM ET"). Returns None if no recognizable
+    date/time is found. Assumes the current year, correcting for a Dec/Jan boundary
+    by picking whichever of {this year, last year, next year} lands closest to now."""
+    from datetime import datetime, timezone, timedelta
+
+    m = _EMBEDDED_DATETIME_RE.search(text or "")
+    if not m:
+        return None
+    month = _MONTH_NUM.get((m.group("mon1") or m.group("mon2") or "").lower())
+    day = m.group("day1") or m.group("day2")
+    if not month or not day:
+        return None
+    day = int(day)
+    hour = int(m.group("hour"))
+    minute = int(m.group("minute"))
+    ampm = (m.group("ampm") or "").lower()
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    dst_off, std_off = _US_TZ_DST_STD_OFFSET_HOURS.get((m.group("tz") or "ET").upper(),
+                                                        _US_TZ_DST_STD_OFFSET_HOURS["ET"])
+    offset_hours = dst_off if 3 <= month <= 11 else std_off
+    tz = timezone(timedelta(hours=offset_hours))
+
+    now = datetime.now(timezone.utc)
+    best = None
+    for year in (now.year, now.year - 1, now.year + 1):
+        try:
+            candidate = datetime(year, month, day, hour, minute, tzinfo=tz)
+        except ValueError:
+            continue
+        if best is None or abs((candidate - now).days) < abs((best - now).days):
+            best = candidate
+    return best.astimezone(timezone.utc) if best else None
+
 
 # Some sports are published under more than one league slug in the schedule feed.
 # College football: "ncaaf" is the real ESPN scoreboard, while "ncaa-football" is the
@@ -812,7 +887,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.01"
+    version = "0.5.02"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1094,6 +1169,22 @@ class Plugin:
                     "default": "",
                     "placeholder": "regex::^NFL Game Pass \\d+:\\s*::NFL: ",
                     "help_text": "Rules applied to auto-created channel names in this group. One per line. Used as a fallback when no Sport Template match is found (or always, if no Sport Template is selected).",
+                },
+                {
+                    "id": f"sports_editor_{gid}_hide_past",
+                    "label": "Hide auto-created channels with a past date in their name",
+                    "type": "boolean",
+                    "default": False,
+                    "help_text": (
+                        "For a channel that never matches a real game (wrong spelling, no "
+                        "current game, etc.) but whose raw provider name shows an already-"
+                        "past date/time (e.g. \"SEP 27 - 8:50 PM ET\"), hide it from the "
+                        "guide/output instead of leaving it visible — a numbered channel slot "
+                        "showing yesterday's game until the provider's next refresh. Only ever "
+                        "un-hides a channel this feature itself hid — a channel you hide "
+                        "manually for any other reason is never touched. Requires Dispatcharr "
+                        "v0.26.0+ (older versions don't have the hidden-from-output field)."
+                    ),
                 },
             ]
 
@@ -2216,10 +2307,18 @@ class Plugin:
             # the channel's own away/home order.
             complete = bool(ev.get("away_team_abbr") and ev.get("home_team_abbr")
                             and ev.get("ingest_source") != "espn_watch")
-            # Last resort (same teams meet twice in the window, e.g. a home-and-home):
-            # prefer the fixture closest to now — a channel is far more likely to
-            # be for the game happening around now than one days away.
-            rank = (combined, complete, direct >= swapped, -abs((start - now).total_seconds()))
+            # Same teams meeting more than once in the window (a home-and-home, or a
+            # best-of series where home/away alternates each game) must be decided by
+            # TIME PROXIMITY first, not orientation — a series' home/away naturally
+            # flips game-to-game, so "which row's order matches the channel text"
+            # says nothing about which DATE the channel actually means (confirmed
+            # bug: a WNBA series with games on 9/27, 9/29 and 10/1 matched the 9/29
+            # game because its order happened to align, even though the channel's
+            # own name said "SEP 27"). Orientation is now only the tiebreak for two
+            # rows of the SAME game (same start time) — the case it was built for:
+            # SDP's "espn_watch" duplicate row, which shares the main row's start
+            # time and is reversed in nearly every case.
+            rank = (combined, complete, -abs((start - now).total_seconds()), direct >= swapped)
             if best_rank is None or rank > best_rank:
                 best_rank, best_event = rank, ev
 
@@ -2675,6 +2774,66 @@ class Plugin:
                 result.append((group, sport))
         return result
 
+    @staticmethod
+    def _get_hidden_past_channel_ids():
+        from django.core.cache import cache
+        return set(cache.get(HIDDEN_PAST_CHANNELS_CACHE_KEY) or ())
+
+    @staticmethod
+    def _set_hidden_past_channel_ids(ids):
+        from django.core.cache import cache
+        cache.set(HIDDEN_PAST_CHANNELS_CACHE_KEY, set(ids), timeout=HIDDEN_PAST_CHANNELS_CACHE_TTL_SECS)
+
+    @staticmethod
+    def _apply_past_date_hide(ch, matched, hide_setting_on, hidden_ids):
+        """"Hide auto-created channels with a past date in their name" — opt-in per
+        group. `hidden_ids` is the persistent set of Channel ids THIS feature has
+        hidden (see HIDDEN_PAST_CHANNELS_CACHE_KEY); mutated in place. Only ever
+        un-hides a channel that's in that set — a channel a user hid manually for an
+        unrelated reason is never touched, in either direction. Returns True if
+        `hidden_ids` changed, so the caller knows to persist it."""
+        from datetime import datetime, timezone, timedelta
+        from apps.channels.models import Channel
+
+        if matched:
+            # A real Sport Template match this run always means "currently relevant"
+            # — un-hide unconditionally if we were the one holding it hidden.
+            if ch.id in hidden_ids:
+                if ch.hidden_from_output:
+                    Channel.objects.filter(pk=ch.pk).update(hidden_from_output=False)
+                hidden_ids.discard(ch.id)
+                return True
+            return False
+
+        if not hide_setting_on:
+            return False
+
+        when = _parse_embedded_datetime(ch.name)
+        is_past = when is not None and when < datetime.now(timezone.utc) - timedelta(hours=PAST_CHANNEL_GRACE_HOURS)
+
+        if is_past:
+            if ch.id in hidden_ids:
+                return False       # already tracked, nothing to change
+            if ch.hidden_from_output:
+                # Already hidden for some other reason (most likely a user hid it
+                # manually) -- never adopt it into our tracked set. We don't know WHY
+                # it's hidden, and adopting it here would let us wrongly un-hide it
+                # later on the user's behalf once it stops looking like a past event.
+                return False
+            Channel.objects.filter(pk=ch.pk).update(hidden_from_output=True)
+            hidden_ids.add(ch.id)
+            return True
+
+        if ch.id in hidden_ids:
+            # We'd hidden it before; its name no longer parses as a past date (the
+            # provider refreshed it to a new game) even though it still didn't match
+            # this run — un-hide it, since we know WE were the one keeping it hidden.
+            if ch.hidden_from_output:
+                Channel.objects.filter(pk=ch.pk).update(hidden_from_output=False)
+            hidden_ids.discard(ch.id)
+            return True
+        return False
+
     def _process_sports_editor_channel(self, ch, sport_slug, events, settings, epg_source):
         """Try to match `ch` (already renamed by regex rules, if any) to a live SDP
         event for `sport_slug`. On a match: rename the channel via the sport's
@@ -2834,20 +2993,28 @@ class Plugin:
             return {"matched": 0, "scanned": 0}
 
         epg_source = self._sports_editor_epg_source()
+        hidden_ids = self._get_hidden_past_channel_ids()
+        hidden_ids_changed = False
         matched = scanned = 0
         with transaction.atomic():
             for group, sport in sport_groups:
+                hide_setting_on = bool(settings.get(f"sports_editor_{group.id}_hide_past"))
                 channels = Channel.objects.filter(
                     auto_created=True, auto_created_by=m3u_account, channel_group=group,
                 )
                 for ch in channels:
                     scanned += 1
                     try:
-                        if self._process_sports_editor_channel(ch, sport, events, settings, epg_source):
+                        is_matched = self._process_sports_editor_channel(ch, sport, events, settings, epg_source)
+                        if is_matched:
                             matched += 1
+                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids):
+                            hidden_ids_changed = True
                     except Exception as e:
                         LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
 
+        if hidden_ids_changed:
+            self._set_hidden_past_channel_ids(hidden_ids)
         if matched:
             _invalidate_epg_output_cache()
         self._mark_epg_source_success(
@@ -2881,31 +3048,44 @@ class Plugin:
             }
 
         epg_source = self._sports_editor_epg_source()
+        hidden_ids = self._get_hidden_past_channel_ids()
+        hidden_ids_changed = False
         lines = []
-        total_matched = total_scanned = 0
+        total_matched = total_scanned = total_hidden = 0
         with transaction.atomic():
             for group, sport in sport_groups:
+                hide_setting_on = bool(settings.get(f"sports_editor_{group.id}_hide_past"))
                 channels = list(Channel.objects.filter(auto_created=True, channel_group=group))
-                group_matched = 0
+                group_matched = group_hidden = 0
                 examples = []
                 for ch in channels:
                     old_name = ch.name
+                    was_hidden_by_us = ch.id in hidden_ids
                     try:
-                        if self._process_sports_editor_channel(ch, sport, events, settings, epg_source):
+                        is_matched = self._process_sports_editor_channel(ch, sport, events, settings, epg_source)
+                        if is_matched:
                             group_matched += 1
                             if len(examples) < 5:
                                 examples.append(f"  '{old_name}' -> '{ch.name}'")
+                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids):
+                            hidden_ids_changed = True
+                            if not was_hidden_by_us and ch.id in hidden_ids:
+                                group_hidden += 1
                     except Exception as e:
                         LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
                 total_scanned += len(channels)
                 total_matched += group_matched
+                total_hidden += group_hidden
                 sport_label = _SPORT_TEMPLATES.get(sport) or (_ANY_SPORT_LABEL if sport == _ANY_SPORT_VALUE else sport)
                 lines.append(
                     f"{group.name} ({sport_label}): "
                     f"scanned {len(channels)}, matched {group_matched}"
+                    + (f", newly hidden {group_hidden}" if hide_setting_on else "")
                 )
                 lines.extend(examples)
 
+        if hidden_ids_changed:
+            self._set_hidden_past_channel_ids(hidden_ids)
         if total_matched:
             _invalidate_epg_output_cache()
         self._mark_epg_source_success(
@@ -2914,7 +3094,8 @@ class Plugin:
         lines.insert(
             0,
             f"Sports Editor EPG: {total_matched} channel(s) matched to live games across "
-            f"{len(sport_groups)} group(s), {total_scanned} auto-created channel(s) scanned.",
+            f"{len(sport_groups)} group(s), {total_scanned} auto-created channel(s) scanned"
+            + (f", {total_hidden} newly hidden (past date, no match)." if total_hidden else "."),
         )
         return {"success": True, "message": "\n".join(lines)}
 
