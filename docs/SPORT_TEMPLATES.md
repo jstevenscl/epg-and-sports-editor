@@ -47,7 +47,7 @@ Scroll down to the **SPORT TEMPLATES** section — one sub-section per sport, sh
 | Field | Used for |
 |---|---|
 | **Channel Name** | Renames the matched channel |
-| **Logo URL** | Assigned as the channel's logo |
+| **Logo URL** | Assigned as the channel's logo — and, as of v0.5.04, also written onto each generated Pregame/Live/Postgame program as a programme-level XMLTV `<icon>`, so guide apps that show per-program artwork (Jellyfin, Plex) display the matchup image instead of generic placeholder art. No separate setting — it's the same rendered URL, just applied in both places. |
 | **Pregame Title** / **Pregame Description** | EPG block from the start of the **Pregame Window** through kickoff (see [Pregame and Postgame windows](#pregame-and-postgame-windows)) |
 | **Live Title** / **Live Description** | EPG block covering the estimated game window |
 | **Postgame Title** / **Postgame Description** | EPG block from the estimated end through the end of the **Postgame Window** |
@@ -93,6 +93,8 @@ Some providers reuse a fixed numbered channel slot for each day's game, and it b
 - **Automatically un-hidden** the moment either (a) the channel gets a real Sport Template match again (a live/upcoming game — always un-hidden, since that's now clearly current), or (b) its raw name no longer parses as a past date on a later run (the provider refreshed that slot) even without a fresh match.
 - **Never touches a channel you hid manually for any other reason.** This feature only ever un-hides a channel it hid itself — it tracks which channels those are internally, and a channel that's already hidden for some other reason is left alone entirely, in both directions.
 - Off by default, per group.
+
+**"Past" is calculated in real UTC time, never your own local time zone — a viewer far ahead of US time zones (e.g. New Zealand) will not get channels hidden early.** The date/time text embedded in a channel's name (`SEP 27 8:50 PM ET`) is parsed using the time zone written *in that text* (`ET`/`CT`/`MT`/`PT`) and converted to one specific real-world UTC instant — the same instant everywhere on Earth. That instant, plus a small grace buffer, is then compared against the actual current UTC time. Your own clock, calendar date, or **Local Display Timezone** setting never enters this calculation at all — a NZ viewer being ~16–21 hours ahead of US Eastern cannot make a game look "already past" any sooner than it would for a viewer sitting in that same US time zone. It never checks "has the calendar date SEP 27 passed" (which is the thing that *would* break for a viewer far ahead); it checks "has enough real elapsed time passed since that exact moment."
 
 ## Step 4 — Run it
 

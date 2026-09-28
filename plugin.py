@@ -892,7 +892,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.03"
+    version = "0.5.04"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -2927,6 +2927,15 @@ class Plugin:
             ch.name = new_name
             ch.save(update_fields=["name"])
 
+        # Computed here (rather than down by the Logo assignment below) so the same
+        # matchup image can also go on each generated ProgramData row as a program-
+        # level <icon> — Dispatcharr already exports custom_properties["icon"] as an
+        # XMLTV <icon> on the <programme> element (apps/output/epg.py), so clients
+        # like Jellyfin/Plex that prefer programme-level artwork over the channel
+        # logo show the matchup image instead of generic placeholder art.
+        logo_url_tpl = settings.get(f"sport_tpl_{template_slug}_logo_url") or defaults["logo_url"]
+        logo_url = self._render_sports_template(logo_url_tpl, vars_base)
+
         tvg_id = f"epg-and-sports-editor-sports-{ch.id}"
         epg_entry, _ = EPGData.objects.get_or_create(
             tvg_id=tvg_id, epg_source=epg_source, defaults={"name": ch.name, "icon_url": ""},
@@ -2964,7 +2973,7 @@ class Plugin:
             batch.append(ProgramData(
                 epg=epg_entry, start_time=b_start, end_time=b_end,
                 title=title or ch.name, sub_title=None, description=desc or None,
-                tvg_id=tvg_id, custom_properties={},
+                tvg_id=tvg_id, custom_properties={"icon": logo_url} if logo_url else {},
             ))
         ProgramData.objects.bulk_create(batch)
 
@@ -2975,8 +2984,6 @@ class Plugin:
         # which lacks any field the user never saved, so a bare "" default left the
         # stream's own logo in place until the manual action (which receives
         # defaults-merged settings) ran.
-        logo_url_tpl = settings.get(f"sport_tpl_{template_slug}_logo_url") or defaults["logo_url"]
-        logo_url = self._render_sports_template(logo_url_tpl, vars_base)
         if logo_url:
             logo_obj, _ = Logo.objects.get_or_create(url=logo_url, defaults={"name": ch.name})
             if ch.logo_id != logo_obj.id:
