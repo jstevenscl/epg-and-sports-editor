@@ -471,6 +471,9 @@ Fixed in v0.5.02. Happens when the same two teams meet more than once in the mat
 **Can a stale numbered channel showing yesterday's game be hidden until the provider refreshes it?**
 Yes, as of v0.5.02 — turn on **Hide auto-created channels with a past date in their name** for that group. See [the Settings Reference](#sports-editor) above and the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#hiding-auto-created-channels-with-a-past-date-in-their-name-v0502)** for how it decides and how un-hiding works.
 
+**A Sunday/Monday/Thursday Night Football channel doesn't match.**
+Fixed in v0.5.03 for the `4K - SNF`/`HD MNF:`/bare `TNF` shape (e.g. `NFL | 4K - SNF 8:20pm Rams at Broncos`) — a resolution tag plus prime-time broadcast-slot code wasn't recognized as noise, so it stuck to the team name and matched nothing. This isn't a weakness in same-day matching or the scoring engine itself — it's specifically that noise-stripping only recognizes provider decoration it's already seen. If you hit a genuinely new unrecognized shape, **report the exact raw channel name** rather than assuming it can't be fixed; every format added stays fixed going forward. See [the matching engine](docs/SPORT_TEMPLATES.md#the-matching-engine-explained) for the full list of what's already handled.
+
 **Where did SiriusXM channel management go?**
 It's been removed from EPG & Sports Editor as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Ticker](https://github.com/jstevenscl/ticker) plugin.
 

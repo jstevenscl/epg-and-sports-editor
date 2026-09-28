@@ -740,6 +740,11 @@ _MATCHUP_LEAD_RES = [
     re.compile(r"^\s*\d{1,3}\s*[|:\-]\s*"),                                         # leftover "031 | "
     re.compile(rf"^\s*{_LEAGUE_WORDS_RE_FRAG}\s*[:\-|]?\s+", re.IGNORECASE),        # repeated league word
     re.compile(r"^\s*\d{1,2}(?::\d{2})?\s*[AaPp][Mm]\s*[-:|]?\s+"),                 # "7:30PM " "8pm "
+    # "4K - SNF ", "HD MNF: ", bare "TNF " -- a resolution/quality tag (optional)
+    # plus an NFL prime-time broadcast-slot code. The kickoff time that usually
+    # follows ("8:20pm Rams at Broncos") is stripped separately, on a later pass,
+    # by the "7:30PM "/"8pm " rule two lines up.
+    re.compile(r"^\s*(?:(?:4K|UHD|FHD|HD|SD)\s*[-:|]?\s*)?(?:SNF|MNF|TNF)\s*[-:|]?\s+", re.IGNORECASE),
 ]
 _MATCHUP_RANK_RE = re.compile(r"^\s*(?:#\d{1,2}|\(\d{1,2}\)|No\.\s*\d{1,2})\s+", re.IGNORECASE)
 _MATCHUP_TRAIL_RES = [
@@ -887,7 +892,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.02"
+    version = "0.5.03"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
