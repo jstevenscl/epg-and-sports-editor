@@ -892,7 +892,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.05"
+    version = "0.5.06"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -2118,13 +2118,13 @@ class Plugin:
             code = _normalize_network_token(frag)
             if code in _NETWORK_CODES:
                 return code
-            # A provider's own regional-feed number ("BIG TEN NETWORK 2", for a
-            # second numbered feed of the same network) isn't a distinct network in
-            # SDP's data -- confirmed SDP only carries plain "BTN"/"BTN+", no "BTN2".
-            # Retry without a trailing standalone number. Codes that already end in a
-            # digit with no preceding space ("ESPN2", "FS1") are untouched by this,
-            # since the regex requires whitespace before the digit(s).
-            stripped = re.sub(r"\s+\d+$", "", frag)
+            # A provider's own regional/alternate-feed marker ("BIG TEN NETWORK 2",
+            # "BIG TEN NETWORK ALT") isn't a distinct network in SDP's data --
+            # confirmed SDP only carries plain "BTN"/"BTN+", no "BTN2"/"BTN ALT".
+            # Retry without a trailing standalone number or ALT(ERNATE) marker. Codes
+            # that already end in a digit with no preceding space ("ESPN2", "FS1")
+            # are untouched by this, since the regex requires whitespace before it.
+            stripped = re.sub(r"\s+(?:\d+|ALT(?:ERNATE)?\s*\d*)$", "", frag, flags=re.IGNORECASE)
             if stripped != frag:
                 code = _normalize_network_token(stripped)
                 if code in _NETWORK_CODES:
