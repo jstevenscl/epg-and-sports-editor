@@ -892,7 +892,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.04"
+    version = "0.5.05"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -2897,11 +2897,28 @@ class Plugin:
             # (or one with no scoreboard slug at all) — nothing to render it with.
             return False
 
+        start = datetime.fromisoformat(event["start_time_utc"].replace("Z", "+00:00"))
+
+        # If the channel's own raw name states a specific date/time (most provider
+        # formats do: "SEP 25 - 7:30 PM ET", "Sep 26 7:00 PM", etc.), and the matched
+        # event's date disagrees with it by more than a day and a half, reject the
+        # match outright rather than trust it. This catches a real, reported failure
+        # mode: a channel whose own named game has aged out of the 20h-back/10-day-
+        # forward matching window (it's stale — never got reprocessed while that game
+        # was still current) has no correct candidate left, but the SAME two teams
+        # often play again later in the window/season — that unrelated future
+        # rematch then wins by default, silently renaming the channel to the wrong
+        # date's game. A generous 36h tolerance easily covers _parse_embedded_
+        # datetime's own DST/timezone approximation; every real mismatch reported
+        # so far has been multiple days off, not hours.
+        embedded_dt = _parse_embedded_datetime(ch.name)
+        if embedded_dt is not None and abs((start - embedded_dt).total_seconds()) > 36 * 3600:
+            return False
+
         # A game whose entire Pregame/Live/Postgame window has already elapsed is
         # useless to match — it would rename the channel and write EPG blocks that
         # are already 100% in the past by the time anyone looks at the guide. Treat
         # it as no match so the group's Rename Rules fallback (or no-op) applies instead.
-        start = datetime.fromisoformat(event["start_time_utc"].replace("Z", "+00:00"))
         duration_hours = _LEAGUE_DURATION_HOURS.get(template_slug, 3.0)
         est_end = start + timedelta(hours=duration_hours)
         # Pregame defaults to "all day" (from midnight on game day) rather than just an
