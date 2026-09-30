@@ -196,7 +196,22 @@ HIDDEN_PAST_CHANNELS_CACHE_KEY = "epg_and_sports_editor_hidden_past_channels"
 HIDDEN_PAST_CHANNELS_CACHE_TTL_SECS = 60 * 24 * 60 * 60
 # Grace period after a channel's embedded date/time before it counts as "past" —
 # absorbs the coarse timezone/DST approximation in _parse_embedded_datetime.
+# Measured from the game's START time as stated in the channel name, not from its end.
+# User-configurable ("sports_editor_hide_past_grace_hours"); this is the default.
 PAST_CHANNEL_GRACE_HOURS = 4.0
+PAST_CHANNEL_GRACE_HOURS_MAX = 72.0
+PAST_CHANNEL_GRACE_HOURS_OPTIONS = ["1", "2", "3", "4", "5", "6", "8", "12", "24", "48"]
+
+
+def _past_grace_hours(settings):
+    """Configured hide-past grace in hours (clamped to [0, PAST_CHANNEL_GRACE_HOURS_MAX]);
+    the default for a missing/blank/garbled value — the automatic post-refresh path
+    reads RAW saved settings, so an unsaved field must fall back to the default."""
+    try:
+        hours = float((settings or {}).get("sports_editor_hide_past_grace_hours"))
+    except (TypeError, ValueError):
+        return PAST_CHANNEL_GRACE_HOURS
+    return max(0.0, min(PAST_CHANNEL_GRACE_HOURS_MAX, hours))
 
 _MATCHUP_SEP_RE = re.compile(r"\s+(?:@|vs\.?|v\.?|at)\s+", re.IGNORECASE)
 
@@ -499,11 +514,16 @@ _LEADING_PIPE_EVENT_RE = re.compile(
 # fallback) is good enough. Handles both day-then-month ("27 Sep 01:05 PM ET") and
 # month-then-day ("SEP 27 - 8:50 PM ET") orders, with "-", "-", "@" or plain
 # whitespace between the date and time.
-_DATE_TIME_SEP_RE_FRAG = r'(?:\s*[-–—@]\s*|\s+)'
+_DATE_TIME_SEP_RE_FRAG = r'(?:\s*[-–—@,]\s*|\s+at\s+|\s+)'
+# Also handles a purely numeric month.day date ("9.29 8:00 PM ET"), a "Wednesday Sep
+# 30 at 1:00 PM NZDT" style, and explicit timezone abbreviations beyond ET/CT/MT/PT.
 _EMBEDDED_DATETIME_RE = re.compile(
-    rf'(?:(?P<day1>\d{{1,2}})\s+(?P<mon1>{_MONTHS_RE_FRAG})|(?P<mon2>{_MONTHS_RE_FRAG})\.?\s+(?P<day2>\d{{1,2}}))'
+    rf'(?:(?P<day1>\d{{1,2}})(?:st|nd|rd|th)?\s+(?P<mon1>{_MONTHS_RE_FRAG})'
+    rf'|(?P<mon2>{_MONTHS_RE_FRAG})\.?\s+(?P<day2>\d{{1,2}})(?:st|nd|rd|th)?'
+    rf'|(?<![\d./:])(?P<num1>\d{{1,2}})[./](?P<num2>\d{{1,2}})(?![\d./:]))'
     rf'{_DATE_TIME_SEP_RE_FRAG}'
-    rf'(?P<hour>\d{{1,2}}):(?P<minute>\d{{2}})\s*(?P<ampm>[AaPp][Mm])?\s*(?P<tz>ET|CT|MT|PT)?',
+    rf'(?P<hour>\d{{1,2}}):(?P<minute>\d{{2}})\s*(?P<ampm>[AaPp][Mm])?'
+    rf'(?:\s*(?P<tz>E[SD]T|C[SD]T|M[SD]T|P[SD]T|NZ[SD]T|AE[SD]T|UTC|GMT|BST|UK|ET|CT|MT|PT)\b)?',
     re.IGNORECASE,
 )
 _MONTH_NUM = {m: i + 1 for i, m in enumerate(
@@ -511,6 +531,12 @@ _MONTH_NUM = {m: i + 1 for i, m in enumerate(
 )}
 # (DST offset, standard offset), matching _pregame_start's month-based approximation.
 _US_TZ_DST_STD_OFFSET_HOURS = {"ET": (-4, -5), "CT": (-5, -6), "MT": (-6, -7), "PT": (-7, -8)}
+# Abbreviations that already say which side of DST they are — a fixed offset, no
+# month-based guess needed. "UK" is a provider shorthand for London local time.
+_FIXED_TZ_OFFSET_HOURS = {
+    "EDT": -4, "EST": -5, "CDT": -5, "CST": -6, "MDT": -6, "MST": -7, "PDT": -7, "PST": -8,
+    "UTC": 0, "GMT": 0, "BST": 1, "NZDT": 13, "NZST": 12, "AEDT": 11, "AEST": 10,
+}
 
 
 def _parse_embedded_datetime(text):
@@ -520,24 +546,37 @@ def _parse_embedded_datetime(text):
     by picking whichever of {this year, last year, next year} lands closest to now."""
     from datetime import datetime, timezone, timedelta
 
-    m = _EMBEDDED_DATETIME_RE.search(text or "")
-    if not m:
+    for m in _EMBEDDED_DATETIME_RE.finditer(text or ""):
+        ampm = (m.group("ampm") or "").lower()
+        tz_name = (m.group("tz") or "").upper()
+        if m.group("num1") is not None:
+            # A bare "9.29" is also what sub-channel numbers ("4.1 7:00") and versions
+            # look like — only trust it when the time carries AM/PM or a timezone.
+            if not ampm and not tz_name:
+                continue
+            month, day = int(m.group("num1")), int(m.group("num2"))
+            if month > 12 and day <= 12:
+                month, day = day, month     # day.month order
+        else:
+            month = _MONTH_NUM.get((m.group("mon1") or m.group("mon2") or "").lower())
+            day = int(m.group("day1") or m.group("day2") or 0)
+        hour, minute = int(m.group("hour")), int(m.group("minute"))
+        if not month or not 1 <= month <= 12 or not 1 <= day <= 31 or hour > 23 or minute > 59:
+            continue
+        break
+    else:
         return None
-    month = _MONTH_NUM.get((m.group("mon1") or m.group("mon2") or "").lower())
-    day = m.group("day1") or m.group("day2")
-    if not month or not day:
-        return None
-    day = int(day)
-    hour = int(m.group("hour"))
-    minute = int(m.group("minute"))
-    ampm = (m.group("ampm") or "").lower()
     if ampm == "pm" and hour != 12:
         hour += 12
     elif ampm == "am" and hour == 12:
         hour = 0
-    dst_off, std_off = _US_TZ_DST_STD_OFFSET_HOURS.get((m.group("tz") or "ET").upper(),
-                                                        _US_TZ_DST_STD_OFFSET_HOURS["ET"])
-    offset_hours = dst_off if 3 <= month <= 11 else std_off
+    if tz_name in _FIXED_TZ_OFFSET_HOURS:
+        offset_hours = _FIXED_TZ_OFFSET_HOURS[tz_name]
+    elif tz_name == "UK":
+        offset_hours = 1 if 3 <= month <= 10 else 0
+    else:
+        dst_off, std_off = _US_TZ_DST_STD_OFFSET_HOURS.get(tz_name or "ET", _US_TZ_DST_STD_OFFSET_HOURS["ET"])
+        offset_hours = dst_off if 3 <= month <= 11 else std_off
     tz = timezone(timedelta(hours=offset_hours))
 
     now = datetime.now(timezone.utc)
@@ -892,7 +931,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.06"
+    version = "0.5.07"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1256,6 +1295,26 @@ class Plugin:
                 "next M3U refresh restores the provider's original channel name and the channel is no "
                 "longer rewritten. Longer values keep finished games' names and recaps visible for longer "
                 "(useful if you check the guide late at night); shorter values free the channel sooner."
+            ),
+        })
+
+        fields.append({
+            "id": "sports_editor_hide_past_grace_hours",
+            "label": "Hide Past-Date Channels After (hours past the start time)",
+            "type": "select",
+            "default": str(int(PAST_CHANNEL_GRACE_HOURS)),
+            "options": [
+                {"value": v, "label": f"{v} hour" + ("" if v == "1" else "s")}
+                for v in PAST_CHANNEL_GRACE_HOURS_OPTIONS
+            ],
+            "help_text": (
+                "Used by 'Hide auto-created channels with a past date in their name' (per group, above). "
+                "A channel is hidden once the date/time in its raw provider name is more than this many "
+                "hours in the past — counted from the game's START time, not its end — AND it no longer "
+                "matches a game. A channel still inside its match window (game length + Postgame Window) "
+                "is never hidden, so with a long Postgame Window the channel hides when that window ends, "
+                "not at this number. Raise it if your provider's times are in a timezone the plugin can't "
+                "read (it assumes US Eastern when none is given)."
             ),
         })
 
@@ -2790,7 +2849,7 @@ class Plugin:
         cache.set(HIDDEN_PAST_CHANNELS_CACHE_KEY, set(ids), timeout=HIDDEN_PAST_CHANNELS_CACHE_TTL_SECS)
 
     @staticmethod
-    def _apply_past_date_hide(ch, matched, hide_setting_on, hidden_ids):
+    def _apply_past_date_hide(ch, matched, hide_setting_on, hidden_ids, grace_hours=PAST_CHANNEL_GRACE_HOURS):
         """"Hide auto-created channels with a past date in their name" — opt-in per
         group. `hidden_ids` is the persistent set of Channel ids THIS feature has
         hidden (see HIDDEN_PAST_CHANNELS_CACHE_KEY); mutated in place. Only ever
@@ -2814,7 +2873,7 @@ class Plugin:
             return False
 
         when = _parse_embedded_datetime(ch.name)
-        is_past = when is not None and when < datetime.now(timezone.utc) - timedelta(hours=PAST_CHANNEL_GRACE_HOURS)
+        is_past = when is not None and when < datetime.now(timezone.utc) - timedelta(hours=grace_hours)
 
         if is_past:
             if ch.id in hidden_ids:
@@ -3024,6 +3083,7 @@ class Plugin:
         epg_source = self._sports_editor_epg_source()
         hidden_ids = self._get_hidden_past_channel_ids()
         hidden_ids_changed = False
+        grace_hours = _past_grace_hours(settings)
         matched = scanned = 0
         with transaction.atomic():
             for group, sport in sport_groups:
@@ -3037,7 +3097,7 @@ class Plugin:
                         is_matched = self._process_sports_editor_channel(ch, sport, events, settings, epg_source)
                         if is_matched:
                             matched += 1
-                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids):
+                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours):
                             hidden_ids_changed = True
                     except Exception as e:
                         LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
@@ -3079,6 +3139,7 @@ class Plugin:
         epg_source = self._sports_editor_epg_source()
         hidden_ids = self._get_hidden_past_channel_ids()
         hidden_ids_changed = False
+        grace_hours = _past_grace_hours(settings)
         lines = []
         total_matched = total_scanned = total_hidden = 0
         with transaction.atomic():
@@ -3096,7 +3157,7 @@ class Plugin:
                             group_matched += 1
                             if len(examples) < 5:
                                 examples.append(f"  '{old_name}' -> '{ch.name}'")
-                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids):
+                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours):
                             hidden_ids_changed = True
                             if not was_hidden_by_us and ch.id in hidden_ids:
                                 group_hidden += 1
