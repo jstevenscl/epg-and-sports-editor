@@ -63,8 +63,9 @@ def _link_channel_epg(channel, epg_entry):
     data, cannot parse programs") even though the program data is fine. A queryset
     .update() skips model signals; callers invalidate the guide cache themselves via
     _invalidate_epg_output_cache() once their program rows are committed."""
-    type(channel).objects.filter(pk=channel.pk).update(epg_data=epg_entry)
+    type(channel).objects.filter(pk=channel.pk).update(epg_data=epg_entry, epg_id=epg_entry.tvg_id)
     channel.epg_data = epg_entry
+    channel.epg_id = epg_entry.tvg_id
 
 
 def _invalidate_epg_output_cache():
