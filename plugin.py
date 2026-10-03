@@ -213,6 +213,16 @@ def _past_grace_hours(settings):
         return PAST_CHANNEL_GRACE_HOURS
     return max(0.0, min(PAST_CHANNEL_GRACE_HOURS_MAX, hours))
 
+
+def _has_current_generated_epg(ch, now):
+    """True if this plugin's own generated Sports Editor EPG for `ch` (the per-channel
+    EPGData keyed `epg-and-sports-editor-sports-<id>`, see _process_sports_editor_
+    channel) still has a programme block that hasn't ended by `now`."""
+    from apps.epg.models import ProgramData
+    return ProgramData.objects.filter(
+        epg__tvg_id=f"epg-and-sports-editor-sports-{ch.id}", end_time__gt=now
+    ).exists()
+
 _MATCHUP_SEP_RE = re.compile(r"\s+(?:@|vs\.?|v\.?|at)\s+", re.IGNORECASE)
 
 
@@ -784,6 +794,11 @@ _MATCHUP_LEAD_RES = [
     # follows ("8:20pm Rams at Broncos") is stripped separately, on a later pass,
     # by the "7:30PM "/"8pm " rule two lines up.
     re.compile(r"^\s*(?:(?:4K|UHD|FHD|HD|SD)\s*[-:|]?\s*)?(?:SNF|MNF|TNF)\s*[-:|]?\s+", re.IGNORECASE),
+    # "B1G Football - Purdue", "Football - UTEP", "SEC Football: LSU", "College Football - Utah"
+    # -- a (conference/league) tag plus the word Football and a dash/colon/pipe. The
+    # existing "Big 12: TCU" colon rule can't catch these when the separator is a dash.
+    re.compile(r"^\s*(?:[A-Za-z0-9+&]{1,12}\s+)?(?:College\s+)?Football\s*[-–:|]\s*", re.IGNORECASE),
+    re.compile(r"^\s*American\s+Football\s+NCAA\s+Football\s+", re.IGNORECASE),    # "American Football NCAA Football Stanford"
 ]
 _MATCHUP_RANK_RE = re.compile(r"^\s*(?:#\d{1,2}|\(\d{1,2}\)|No\.\s*\d{1,2})\s+", re.IGNORECASE)
 _MATCHUP_TRAIL_RES = [
@@ -798,6 +813,7 @@ _MATCHUP_TRAIL_RES = [
     re.compile(rf"\s+{_MONTHS_RE_FRAG}[a-z]*\.?\s+\d{{1,2}}\b.*$", re.IGNORECASE),  # " SEP 25 - 8:00 PM ET / 1:00 AM UK"
     re.compile(r"\s*\|\s*[A-Za-z]+,\s.*$"),                                         # "| Saturday, 08 March 2025 20:00"
     re.compile(r"\s*@\s*$"),                                                        # dangling "@"
+    re.compile(r"\s+\d{1,2}(?::\d{2})?\s*[AaPp][Mm](?:\s*(?:ET|CT|MT|PT))?\s*$"),    # "UC Davis 10pm" "Trinity (TX) 8pm"
 ]
 
 
@@ -931,7 +947,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.07"
+    version = "0.5.08"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1702,7 +1718,7 @@ class Plugin:
             if settings.get(f"src_{instance.id}_enabled", False):
                 LOGGER.info(f"EPG & Sports Editor: '{instance.name}' refreshed — transforming")
                 try:
-                    self._do_transform_source(instance, settings)
+                    self._do_transform_source(instance, settings, _reparse="after_refresh")
                 except Exception as e:
                     LOGGER.error(f"EPG & Sports Editor: transform failed for '{instance.name}': {e}")
 
@@ -2873,7 +2889,15 @@ class Plugin:
             return False
 
         when = _parse_embedded_datetime(ch.name)
-        is_past = when is not None and when < datetime.now(timezone.utc) - timedelta(hours=grace_hours)
+        now = datetime.now(timezone.utc)
+        is_past = when is not None and when < now - timedelta(hours=grace_hours)
+        if is_past and _has_current_generated_epg(ch, now):
+            # The name's date says "past", but this plugin's own Pregame/Live/Postgame
+            # blocks for the channel haven't finished yet — the game is still current
+            # as far as the guide is concerned. Trust that over a date parsed out of
+            # free text (a provider timezone/format we misread must never hide a
+            # channel that was just matched, renamed and given EPG).
+            is_past = False
 
         if is_past:
             if ch.id in hidden_ids:
@@ -2886,6 +2910,10 @@ class Plugin:
                 return False
             Channel.objects.filter(pk=ch.pk).update(hidden_from_output=True)
             hidden_ids.add(ch.id)
+            LOGGER.info(
+                f"EPG & Sports Editor: hid channel {ch.id} '{ch.name}' (past-date hide: name's "
+                f"start {when:%Y-%m-%d %H:%M}Z is more than {grace_hours:g}h ago, no current game match)"
+            )
             return True
 
         if ch.id in hidden_ids:
@@ -3277,6 +3305,100 @@ class Plugin:
             EPGData.objects.bulk_create(to_create, ignore_conflicts=True)
         return {e.tvg_id: e for e in EPGData.objects.filter(epg_source=virtual)}
 
+    # ── Keeping the SOURCE's own programs fresh ───────────────────────────
+    # Dispatcharr only parses programs for EPGData that a channel is mapped to ON
+    # THAT SOURCE. Once Setup moves every channel onto the virtual source, the main
+    # source has nothing mapped: its refresh logs "No channels mapped", parses
+    # nothing, still reports success, and its old ProgramData just sits there —
+    # which this plugin then copies, unchanged, until it all ends (about a week
+    # later) and the guide goes empty. So the plugin asks Dispatcharr to re-parse
+    # those unmapped-but-still-needed entries itself (force=True parses an entry
+    # whether or not a channel maps to it) before copying.
+    REPARSE_IF_ENDS_WITHIN_HOURS = 12
+    _reparse_in_flight = set()
+
+    @staticmethod
+    def _source_entries_needing_reparse(source, entries, only_if_stale):
+        """ids of `entries` (EPGData of `source`) that Dispatcharr won't refresh on its
+        own — no channel maps to them on `source` — and, if only_if_stale, whose
+        programs end within REPARSE_IF_ENDS_WITHIN_HOURS (or don't exist)."""
+        from django.db.models import Max
+        from apps.channels.models import Channel
+        from apps.epg.models import ProgramData
+        from datetime import datetime, timedelta, timezone
+
+        try:
+            from apps.channels.managers import epg_ids_mapped_to_channels
+            mapped = set(epg_ids_mapped_to_channels(epg_source=source))
+        except ImportError:        # older Dispatcharr: no overrides, plain channel mapping
+            mapped = set(Channel.objects.filter(epg_data__epg_source=source).values_list("epg_data_id", flat=True))
+        ids = [e.id for e in entries if e.id not in mapped]
+        if not ids or not only_if_stale:
+            return ids
+        horizon = datetime.now(timezone.utc) + timedelta(hours=Plugin.REPARSE_IF_ENDS_WITHIN_HOURS)
+        latest = dict(
+            ProgramData.objects.filter(epg_id__in=ids).values_list("epg_id").annotate(m=Max("end_time"))
+        )
+        return [i for i in ids if latest.get(i) is None or latest[i] < horizon]
+
+    @staticmethod
+    def _reparse_source_entries(epg_ids):
+        """Run Dispatcharr's own per-entry program parse inline for each id. Returns
+        how many it actually parsed (a source mid-refresh makes it defer instead)."""
+        from apps.epg.tasks import parse_programs_for_tvg_id
+
+        done = 0
+        for eid in epg_ids:
+            try:
+                try:
+                    res = parse_programs_for_tvg_id.apply(args=[eid], kwargs={"force": True})
+                except TypeError:   # older Dispatcharr without the force kwarg
+                    res = parse_programs_for_tvg_id.apply(args=[eid])
+                if res.result == "Deferred":
+                    LOGGER.warning(f"EPG & Sports Editor: re-parse of EPG entry {eid} deferred (source busy)")
+                else:
+                    done += 1
+            except Exception as e:
+                LOGGER.warning(f"EPG & Sports Editor: re-parse of EPG entry {eid} failed: {e}")
+        return done
+
+    @staticmethod
+    def _source_refresh_running(source_id):
+        try:
+            from core.utils import is_task_lock_held
+            return bool(is_task_lock_held("refresh_epg_data", source_id))
+        except Exception:
+            return False
+
+    def _reparse_and_retransform(self, source_id, epg_ids, wait_for_refresh):
+        """Re-parse `epg_ids`, then redo the copy. When called from the post-refresh
+        signal (still inside Dispatcharr's refresh task) it first waits for that
+        refresh to release its lock — a parse started earlier would only defer."""
+        import time
+        from django.db import connection
+        from apps.epg.models import EPGSource
+        try:
+            if wait_for_refresh:
+                deadline = time.time() + 900
+                while time.time() < deadline and self._source_refresh_running(source_id):
+                    time.sleep(3)
+            n = self._reparse_source_entries(epg_ids)
+            cfg = _find_plugin_config(enabled_only=True)
+            if not cfg:
+                return
+            source = EPGSource.objects.get(pk=source_id)
+            LOGGER.info(
+                f"EPG & Sports Editor: '{source.name}' — re-parsed {n}/{len(epg_ids)} EPG entries Dispatcharr "
+                "no longer refreshes on its own (their channels moved to the virtual EPG); re-copying"
+            )
+            self._do_transform_source(source, cfg.settings, _reparse="never")
+        except Exception as e:
+            LOGGER.error(f"EPG & Sports Editor: re-parse/re-transform failed for source {source_id}: {e}")
+        finally:
+            self._reparse_in_flight.discard(source_id)
+            if wait_for_refresh:
+                connection.close()      # this ran on our own thread — don't leak its DB connection
+
     def _channel_qs(self, source, settings):
         from apps.channels.models import Channel
         qs = Channel.objects.filter(epg_data__epg_source=source)
@@ -3343,10 +3465,15 @@ class Plugin:
 
     # ── Transform ─────────────────────────────────────────────────────────
 
-    def _do_transform_source(self, source, settings):
+    def _do_transform_source(self, source, settings, _reparse="stale"):
         """Copy ProgramData from source into its virtual EPG, applying rules.
         Only processes channels actually mapped to user channels (pre- or post-setup).
-        Returns the number of programs written."""
+        Returns the number of programs written.
+
+        `_reparse` controls refreshing the SOURCE's own programs first (see "Keeping the
+        SOURCE's own programs fresh"): "after_refresh" (the source was just refreshed —
+        always re-parse entries Dispatcharr skipped), "stale" (manual runs — only when
+        they're about to run out), "never" (the re-copy that follows a re-parse)."""
         from apps.epg.models import EPGData, ProgramData
         from apps.channels.models import Channel
 
@@ -3372,6 +3499,24 @@ class Plugin:
             )
         else:
             source_entries = EPGData.objects.filter(epg_source=source)
+
+        if assigned_tvg_ids and _reparse != "never":
+            need = self._source_entries_needing_reparse(
+                source, list(source_entries), only_if_stale=(_reparse != "after_refresh")
+            )
+            if need and self._source_refresh_running(source.id):
+                # Called from the post-refresh signal, i.e. inside Dispatcharr's own
+                # refresh task: parsing now would only defer. Copy what exists now and
+                # let a worker re-parse + re-copy once the refresh has finished.
+                if source.id not in self._reparse_in_flight:
+                    self._reparse_in_flight.add(source.id)
+                    import threading
+                    threading.Thread(
+                        target=self._reparse_and_retransform, args=(source.id, need, True),
+                        name=f"epg-sports-editor-reparse-{source.id}", daemon=True,
+                    ).start()
+            elif need:
+                self._reparse_source_entries(need)
 
         total = 0
         with transaction.atomic():

@@ -479,6 +479,12 @@ No. The comparison is done entirely in real UTC time, using the time zone writte
 **A Sunday/Monday/Thursday Night Football channel doesn't match.**
 Fixed in v0.5.03 for the `4K - SNF`/`HD MNF:`/bare `TNF` shape (e.g. `NFL | 4K - SNF 8:20pm Rams at Broncos`) — a resolution tag plus prime-time broadcast-slot code wasn't recognized as noise, so it stuck to the team name and matched nothing. This isn't a weakness in same-day matching or the scoring engine itself — it's specifically that noise-stripping only recognizes provider decoration it's already seen. If you hit a genuinely new unrecognized shape, **report the exact raw channel name** rather than assuming it can't be fixed; every format added stays fixed going forward. See [the matching engine](docs/SPORT_TEMPLATES.md#the-matching-engine-explained) for the full list of what's already handled.
 
+**My guide goes empty about a week after Setup, and re-running Setup fixes it.**
+Fixed in v0.5.08. Once Setup moves your channels onto the virtual EPG, Dispatcharr no longer has any channel mapped to the *original* source, so its refresh reports "No channels mapped" and quietly stops parsing programs for it — the plugin kept re-copying the same old programs until they all ended. The plugin now asks Dispatcharr to re-parse those entries itself after each refresh of the original source (and on manual **Setup**/**Apply Now** when they're about to run out) before copying. If you were on an older version, update and click **Apply Now** once.
+
+**College football channels like `B1G Football - Purdue at Illinois` or `Football - UTEP at New Mexico` don't match.**
+Fixed in v0.5.08: a leading conference/league tag plus the word *Football* and a dash (`B1G Football - `, `Football - `, `SEC Football: `, `American Football NCAA Football `) is now recognized as decoration, and a time glued to the end of a team name (`UC Davis 10pm`) is stripped. As always, if you have a channel shape that still doesn't match, send the exact raw channel name.
+
 **Where did SiriusXM channel management go?**
 It's been removed from EPG & Sports Editor as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Ticker](https://github.com/jstevenscl/ticker) plugin.
 

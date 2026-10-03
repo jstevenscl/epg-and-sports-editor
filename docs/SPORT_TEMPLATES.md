@@ -414,6 +414,9 @@ Yes, as of v0.5.02 — see [Hiding auto-created channels with a past date in the
 **A channel for a prime-time NFL game (Sunday/Monday/Thursday Night Football) doesn't match, even though the game is definitely in the schedule.**
 Fixed in v0.5.03 for the `4K - SNF`/`HD MNF:`/bare `TNF` shape (`NFL | 4K - SNF 8:20pm Rams at Broncos`) — a resolution tag plus prime-time broadcast-slot code wasn't recognized as noise, so it stayed stuck to the team name text (`4K - SNF 8:20pm Rams`) and scored nothing against any real team. If a similar new one turns up — any provider decoration this guide's parsing rules above don't already cover — that's not a same-day-matching weakness; the matching engine itself is solid once it has clean team text, the noise-stripping patterns are just a known list, and a genuinely new provider format has to be seen once before it can be added. **Report it** (with the exact raw channel name) rather than assuming it's unfixable — every format added here stays fixed for everyone going forward.
 
+**College football channels like `B1G Football - Purdue at Illinois` or `Football - UTEP at New Mexico` don't match.**
+Fixed in v0.5.08: a leading conference/league tag plus the word *Football* and a dash (`B1G Football - `, `Football - `, `SEC Football: `, `American Football NCAA Football `) is now recognized as decoration, and a time glued to the end of a team name (`UC Davis 10pm`) is stripped. As always, if you have a channel shape that still doesn't match, send the exact raw channel name.
+
 ---
 
 ## Credits
