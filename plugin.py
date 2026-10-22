@@ -2886,6 +2886,13 @@ class Plugin:
             return False
 
         if not hide_setting_on:
+            # Setting turned off (or never on) -- release anything WE hid while it was on,
+            # otherwise those channels stay hidden forever with no way to un-hide them.
+            if ch.id in hidden_ids:
+                if ch.hidden_from_output:
+                    Channel.objects.filter(pk=ch.pk).update(hidden_from_output=False)
+                hidden_ids.discard(ch.id)
+                return True
             return False
 
         when = _parse_embedded_datetime(ch.name)
