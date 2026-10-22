@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-03T21:34:16Z",
+  "generated_at": "2026-10-22T05:12:06Z",
   "manifest": {
     "registry_url": "https://github.com/jstevenscl/epg-and-sports-editor",
     "registry_name": "jstevenscl/epg-and-sports-editor",
@@ -12,12 +12,12 @@
         "manifest_url": "manifest.json",
         "author": "jstevenscl",
         "license": "MIT",
-        "last_updated": "2026-10-03T21:34:16Z",
-        "latest_version": "0.5.08",
-        "latest_md5": "1cd36d9eeddc2055ddb481802ad9f9d2",
-        "latest_sha256": "39fffe5d75964c4244a6afd433dcea5d296a96c1e4380b712ed8d7adb3fbc66c",
-        "latest_url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.5.08/epg-and-sports-editor-v0.5.08.zip",
-        "latest_size": 174274,
+        "last_updated": "2026-10-22T05:12:06Z",
+        "latest_version": "0.5.09",
+        "latest_md5": "fc13eb90b28cd26124adf22ee06ee253",
+        "latest_sha256": "63a44bd7de1fe984be9a5b9945c22fcb47e9b9a22fd238364dd98745f4190e03",
+        "latest_url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.5.09/epg-and-sports-editor-v0.5.09.zip",
+        "latest_size": 174343,
         "help_url": "https://jstevenscl.github.io/epg-and-sports-editor/designer.html"
       }
     ]
