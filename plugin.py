@@ -947,7 +947,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.09"
+    version = "0.5.10"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -2881,6 +2881,7 @@ class Plugin:
             if ch.id in hidden_ids:
                 if ch.hidden_from_output:
                     Channel.objects.filter(pk=ch.pk).update(hidden_from_output=False)
+                    LOGGER.info(f"EPG & Sports Editor: un-hid channel {ch.id} '{ch.name}' (past-date hide: now matches a current game)")
                 hidden_ids.discard(ch.id)
                 return True
             return False
@@ -2891,6 +2892,7 @@ class Plugin:
             if ch.id in hidden_ids:
                 if ch.hidden_from_output:
                     Channel.objects.filter(pk=ch.pk).update(hidden_from_output=False)
+                    LOGGER.info(f"EPG & Sports Editor: un-hid channel {ch.id} '{ch.name}' (past-date hide setting is off for its group)")
                 hidden_ids.discard(ch.id)
                 return True
             return False
@@ -2929,9 +2931,41 @@ class Plugin:
             # this run — un-hide it, since we know WE were the one keeping it hidden.
             if ch.hidden_from_output:
                 Channel.objects.filter(pk=ch.pk).update(hidden_from_output=False)
+                LOGGER.info(f"EPG & Sports Editor: un-hid channel {ch.id} '{ch.name}' (past-date hide: name no longer parses as a past date)")
             hidden_ids.discard(ch.id)
             return True
         return False
+
+    @staticmethod
+    def _hidden_channel_snapshot(group_id, **extra_filters):
+        """{id: name} of the group's channels currently hidden_from_output=True.
+        Diagnostic only: diffed around a Sports Editor pass to show whether
+        channels got hidden (or un-hidden) during it, and by whom."""
+        from apps.channels.models import Channel
+        return dict(
+            Channel.objects.filter(channel_group_id=group_id, hidden_from_output=True, **extra_filters)
+            .values_list("id", "name")
+        )
+
+    @staticmethod
+    def _log_hidden_diff(group, hide_setting_on, before, after, hidden_ids, source):
+        """Log hidden_from_output changes across one group's pass. A channel that
+        became hidden without this plugin's past-date feature doing it (setting off,
+        or not in our tracked set) points at something outside the plugin."""
+        newly_hidden = {i: n for i, n in after.items() if i not in before}
+        newly_shown = {i: n for i, n in before.items() if i not in after}
+        LOGGER.info(
+            f"EPG & Sports Editor: [{source}] hide-state '{group.name}' (id {group.id}): "
+            f"past-date hide setting={'ON' if hide_setting_on else 'OFF'}, "
+            f"hidden before={len(before)}, after={len(after)}, "
+            f"newly hidden={len(newly_hidden)}, newly un-hidden={len(newly_shown)}, "
+            f"tracked-as-ours={len(hidden_ids)}"
+        )
+        for i, n in list(newly_hidden.items())[:20]:
+            LOGGER.info(
+                f"EPG & Sports Editor: [{source}]   hidden during pass: {i} '{n}' "
+                f"({'by past-date hide' if (hide_setting_on and i in hidden_ids) else 'NOT by plugin past-date hide'})"
+            )
 
     def _process_sports_editor_channel(self, ch, sport_slug, events, settings, epg_source):
         """Try to match `ch` (already renamed by regex rules, if any) to a live SDP
@@ -3126,6 +3160,7 @@ class Plugin:
                 channels = Channel.objects.filter(
                     auto_created=True, auto_created_by=m3u_account, channel_group=group,
                 )
+                hidden_before = self._hidden_channel_snapshot(group.id)
                 for ch in channels:
                     scanned += 1
                     try:
@@ -3136,6 +3171,10 @@ class Plugin:
                             hidden_ids_changed = True
                     except Exception as e:
                         LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
+                self._log_hidden_diff(
+                    group, hide_setting_on, hidden_before, self._hidden_channel_snapshot(group.id),
+                    hidden_ids, "auto",
+                )
 
         if hidden_ids_changed:
             self._set_hidden_past_channel_ids(hidden_ids)
@@ -3181,6 +3220,7 @@ class Plugin:
             for group, sport in sport_groups:
                 hide_setting_on = bool(settings.get(f"sports_editor_{group.id}_hide_past"))
                 channels = list(Channel.objects.filter(auto_created=True, channel_group=group))
+                hidden_before = self._hidden_channel_snapshot(group.id)
                 group_matched = group_hidden = 0
                 examples = []
                 for ch in channels:
@@ -3198,6 +3238,10 @@ class Plugin:
                                 group_hidden += 1
                     except Exception as e:
                         LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
+                self._log_hidden_diff(
+                    group, hide_setting_on, hidden_before, self._hidden_channel_snapshot(group.id),
+                    hidden_ids, "manual",
+                )
                 total_scanned += len(channels)
                 total_matched += group_matched
                 total_hidden += group_hidden

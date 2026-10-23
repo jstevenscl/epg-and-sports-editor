@@ -95,6 +95,15 @@ Some providers reuse a fixed numbered channel slot for each day's game, and it b
 - **Never touches a channel you hid manually for any other reason.** This feature only ever un-hides a channel it hid itself — it tracks which channels those are internally, and a channel that's already hidden for some other reason is left alone entirely, in both directions.
 - Off by default, per group.
 
+**Channels hidden and you didn't turn this on? (v0.5.10+)** This feature can only hide a channel in a group where its toggle is on, so if a group's toggle is off and channels are still hidden, something else hid them (a manual hide, another plugin, or Dispatcharr itself). To tell, check the Dispatcharr log (filter for `EPG & Sports Editor`). Every Sports Editor pass — the automatic one after an M3U refresh and **Run Sport Templates Now** — logs one line per group, for example:
+
+```
+[manual] hide-state 'USA NHL GAMES' (id 1430): past-date hide setting=OFF, hidden before=0, after=3, newly hidden=3, newly un-hidden=0, tracked-as-ours=0
+[manual]   hidden during pass: 53633 'NHL 04 - ...' (NOT by plugin past-date hide)
+```
+
+`hidden before` / `after` count the group's channels hidden from output at the start and end of the pass. Each channel hidden during the pass is listed and labelled **by past-date hide** or **NOT by plugin past-date hide**. When this feature hides or un-hides a channel it also logs that channel by id and name. For a clean test, un-hide the channels in the affected groups first, then run a refresh; any channel that shows up as hidden afterward was hidden during that pass. (A hide or un-hide you do by hand in the Dispatcharr UI is not logged by this plugin.)
+
 **"Past" is calculated in real UTC time, never your own local time zone — a viewer far ahead of US time zones (e.g. New Zealand) will not get channels hidden early.** The date/time text embedded in a channel's name (`SEP 27 8:50 PM ET`) is parsed using the time zone written *in that text* (`ET`/`CT`/`MT`/`PT`, plus `EDT`/`EST`/`CDT`/`CST`/`MDT`/`MST`/`PDT`/`PST`, `UTC`/`GMT`, `BST`/`UK`, `NZDT`/`NZST`, `AEDT`/`AEST` as of v0.5.07; ET is assumed when none is written) and converted to one specific real-world UTC instant — the same instant everywhere on Earth. That instant, plus a small grace buffer, is then compared against the actual current UTC time. Your own clock, calendar date, or **Local Display Timezone** setting never enters this calculation at all — a NZ viewer being ~16–21 hours ahead of US Eastern cannot make a game look "already past" any sooner than it would for a viewer sitting in that same US time zone. It never checks "has the calendar date SEP 27 passed" (which is the thing that *would* break for a viewer far ahead); it checks "has enough real elapsed time passed since that exact moment."
 
 ## Step 4 — Run it
