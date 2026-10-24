@@ -947,7 +947,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.10"
+    version = "0.5.11"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1702,6 +1702,7 @@ class Plugin:
             status_saved = update_fields is None or "status" in (update_fields or [])
             if not status_saved or instance.status != "success":
                 return
+            LOGGER.info(f"EPG & Sports Editor: refresh signal fired for '{instance.name}' (id {instance.id})")
             try:
                 cfg = _find_plugin_config(enabled_only=True)
                 if not cfg:
@@ -1712,9 +1713,14 @@ class Plugin:
                     return
                 settings = cfg.settings
             except Exception as e:
-                LOGGER.debug(f"EPG & Sports Editor: signal could not read settings: {e}")
+                LOGGER.warning(f"EPG & Sports Editor: signal could not read settings: {e}")
                 return
 
+            if not settings.get(f"src_{instance.id}_enabled", False):
+                LOGGER.info(
+                    f"EPG & Sports Editor: '{instance.name}' (id {instance.id}) refreshed but is not enabled "
+                    "in the plugin's settings — no virtual EPG copy made"
+                )
             if settings.get(f"src_{instance.id}_enabled", False):
                 LOGGER.info(f"EPG & Sports Editor: '{instance.name}' refreshed — transforming")
                 try:
@@ -1756,6 +1762,7 @@ class Plugin:
             status_saved = update_fields is None or "status" in (update_fields or [])
             if not status_saved or instance.status != "success":
                 return
+            LOGGER.info(f"EPG & Sports Editor: refresh signal fired for '{instance.name}' (id {instance.id})")
             try:
                 cfg = _find_plugin_config(enabled_only=True)
                 if not cfg:
@@ -3401,12 +3408,17 @@ class Plugin:
         done = 0
         for eid in epg_ids:
             try:
-                try:
-                    res = parse_programs_for_tvg_id.apply(args=[eid], kwargs={"force": True})
-                except TypeError:   # older Dispatcharr without the force kwarg
+                # .apply() runs the task eagerly and stores a raised exception on the
+                # result instead of raising it, so failures have to be read off `res`.
+                res = parse_programs_for_tvg_id.apply(args=[eid], kwargs={"force": True})
+                if res.failed() and isinstance(res.result, TypeError):   # older Dispatcharr without the force kwarg
                     res = parse_programs_for_tvg_id.apply(args=[eid])
-                if res.result == "Deferred":
-                    LOGGER.warning(f"EPG & Sports Editor: re-parse of EPG entry {eid} deferred (source busy)")
+                if res.failed():
+                    LOGGER.warning(f"EPG & Sports Editor: re-parse of EPG entry {eid} failed: {res.result}")
+                elif res.result is not None:
+                    # a successful parse returns None; anything else is a skip reason
+                    # ("Deferred", "Task already running", "EPG not found", ...)
+                    LOGGER.warning(f"EPG & Sports Editor: re-parse of EPG entry {eid} did not run: {res.result}")
                 else:
                     done += 1
             except Exception as e:
@@ -3569,9 +3581,26 @@ class Plugin:
             elif need:
                 self._reparse_source_entries(need)
 
+        # An entry whose source programs are gone (Dispatcharr's orphan cleanup drops
+        # them for entries no channel maps to; a re-parse may not have landed yet) must
+        # not blank its virtual copy: leave what's there until it ages out naturally.
+        with_programs = set(
+            ProgramData.objects.filter(epg__in=source_entries).values_list("epg_id", flat=True).distinct()
+        )
+        kept_virtual_ids = {
+            virtual_map[se.tvg_id].id
+            for se in source_entries
+            if se.id not in with_programs and se.tvg_id in virtual_map
+        }
+        if kept_virtual_ids:
+            LOGGER.warning(
+                f"EPG & Sports Editor: '{source.name}' — {len(kept_virtual_ids)} EPG entries have no programs "
+                "in the source right now; keeping their existing virtual EPG programs"
+            )
+
         total = 0
         with transaction.atomic():
-            ProgramData.objects.filter(epg__epg_source=virtual).delete()
+            ProgramData.objects.filter(epg__epg_source=virtual).exclude(epg_id__in=kept_virtual_ids).delete()
             batch = []
             for se in source_entries.iterator(chunk_size=200):
                 ve = virtual_map.get(se.tvg_id)
