@@ -947,7 +947,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.12"
+    version = "0.5.13"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1723,6 +1723,7 @@ class Plugin:
             return
 
         if settings.get(f"src_{instance.id}_enabled", False):
+            self._reassign_all_enabled(settings, f"'{instance.name}' refresh")
             LOGGER.info(f"EPG & Sports Editor: '{instance.name}' refreshed — transforming")
             try:
                 self._do_transform_source(instance, settings, _reparse="after_refresh")
@@ -1740,6 +1741,13 @@ class Plugin:
                 self._action_fill_epg(settings, LOGGER)
             except Exception as e:
                 LOGGER.error(f"EPG & Sports Editor: auto Fill EPG failed: {e}")
+
+    def _action_on_m3u_refresh(self, settings, logger, params=None):
+        """Dispatcharr's `m3u_refresh` event hook (declared in plugin.json). It fires after
+        Auto Channel Sync has finished, which is when channels can land back on an
+        original EPG source. Idempotent, so it is harmless if the M3U signal also ran."""
+        self._reassign_all_enabled(settings, "M3U refresh event")
+        return {"success": True, "message": "Checked that channels are on their virtual EPGs."}
 
     def _action_on_epg_refresh(self, settings, logger, params=None):
         """Dispatcharr's `epg_refresh` event hook (declared in plugin.json). The event
@@ -1794,7 +1802,7 @@ class Plugin:
             status_saved = update_fields is None or "status" in (update_fields or [])
             if not status_saved or instance.status != "success":
                 return
-            LOGGER.info(f"EPG & Sports Editor: refresh signal fired for '{instance.name}' (id {instance.id})")
+            LOGGER.info(f"EPG & Sports Editor: M3U refresh signal fired for '{instance.name}' (id {instance.id})")
             try:
                 cfg = _find_plugin_config(enabled_only=True)
                 if not cfg:
@@ -1827,6 +1835,9 @@ class Plugin:
                     )
             except Exception as e:
                 LOGGER.error(f"EPG & Sports Editor: Sports Editor EPG generation failed after '{instance.name}' refresh: {e}")
+
+            # Last, so channels the Sports Editor just gave its own EPG are left alone.
+            self._reassign_all_enabled(settings, f"M3U refresh of '{instance.name}'")
 
         post_save.connect(
             _on_m3u_refresh,
@@ -3494,6 +3505,47 @@ class Plugin:
             if wait_for_refresh:
                 connection.close()      # this ran on our own thread — don't leak its DB connection
 
+    def _reassign_channels_to_virtual(self, source, settings):
+        """Point channels still mapped to the ORIGINAL `source` (within the configured
+        include/exclude groups) at its virtual EPG. Returns (reassigned, skipped).
+
+        Setup does this once, but Dispatcharr's Auto Channel Sync re-resolves the EPG of
+        every auto-synced channel on each M3U refresh by tvg_id across ALL sources, so
+        channels can land back on the original source — where none of the rules apply.
+        Channels the plugin gave its own Sports Editor / Fill EPG sit on those sources,
+        not on `source`, so they are never touched."""
+        if not settings.get("auto_reassign", True):
+            return 0, 0
+        qs = self._channel_qs(source, settings)
+        if not qs.exists():
+            return 0, 0
+        virtual, _ = self._get_or_create_virtual(source)
+        virtual_map = self._sync_epgdata(source, virtual)
+        reassigned, skipped = 0, 0
+        for ch in qs.select_related("epg_data"):
+            ve = virtual_map.get(ch.epg_data.tvg_id if ch.epg_data else None)
+            if ve:
+                _link_channel_epg(ch, ve)
+                reassigned += 1
+            else:
+                skipped += 1
+        if reassigned:
+            _invalidate_epg_output_cache()
+        return reassigned, skipped
+
+    def _reassign_all_enabled(self, settings, via):
+        """Run _reassign_channels_to_virtual for every enabled source (after an M3U refresh)."""
+        for source in self._get_enabled_sources(settings):
+            try:
+                n, skipped = self._reassign_channels_to_virtual(source, settings)
+                if n or skipped:
+                    LOGGER.info(
+                        f"EPG & Sports Editor: moved {n} channel(s) back onto '{VIRTUAL_PREFIX}{source.name}' "
+                        f"({skipped} skipped, no matching EPG entry) after {via}"
+                    )
+            except Exception as e:
+                LOGGER.error(f"EPG & Sports Editor: re-assigning channels to '{source.name}' virtual EPG failed: {e}")
+
     def _channel_qs(self, source, settings):
         from apps.channels.models import Channel
         qs = Channel.objects.filter(epg_data__epg_source=source)
@@ -3715,6 +3767,7 @@ class Plugin:
             "sports_editor_epg_now":  self._action_sports_editor_epg_now,
             "restart_dispatcharr":    self._action_restart_dispatcharr,
             "on_epg_refresh":         lambda st, lg: self._action_on_epg_refresh(st, lg, params),
+            "on_m3u_refresh":         lambda st, lg: self._action_on_m3u_refresh(st, lg, params),
         }
         handler = handlers.get(action)
         if not handler:
@@ -3743,18 +3796,7 @@ class Plugin:
             lines.append(f"  Programs    : {total:,} transformed and written")
 
             if settings.get("auto_reassign", True):
-                channels = self._channel_qs(source, settings).select_related("epg_data")
-                reassigned, skipped = 0, 0
-                for ch in channels:
-                    tvg_id = ch.epg_data.tvg_id if ch.epg_data else None
-                    ve = virtual_map.get(tvg_id)
-                    if ve:
-                        _link_channel_epg(ch, ve)
-                        reassigned += 1
-                    else:
-                        skipped += 1
-                if reassigned:
-                    _invalidate_epg_output_cache()
+                reassigned, skipped = self._reassign_channels_to_virtual(source, settings)
                 lines.append(f"  Channels    : {reassigned} reassigned ({skipped} skipped)")
             lines.append("")
 
