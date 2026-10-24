@@ -947,7 +947,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.11"
+    version = "0.5.12"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1691,49 +1691,81 @@ class Plugin:
     # current settings from the DB (so rule changes take effect immediately
     # without re-running Setup) and transforms the matching source.
 
+    def _after_source_refresh(self, instance, via):
+        """Post-refresh work for an EPG source: transform it into its virtual copy and
+        run Fill EPG. Reached two ways — the EPGSource post_save signal, and
+        Dispatcharr's own `epg_refresh` plugin event (the `on_epg_refresh` action). Either
+        may be missing on a given install, so both call this; a short cache lock makes
+        the second arrival a no-op."""
+        if instance.source_type == "dummy" or instance.name.startswith(VIRTUAL_PREFIX):
+            return
+        from django.core.cache import cache
+        try:
+            if not cache.add(f"epg_sports_editor_refresh_{instance.id}", 1, 90):
+                LOGGER.info(
+                    f"EPG & Sports Editor: refresh of '{instance.name}' already handled (via {via} — skipping)"
+                )
+                return
+        except Exception:
+            pass   # no usable cache: worst case is one redundant, idempotent transform
+        LOGGER.info(f"EPG & Sports Editor: refresh of '{instance.name}' (id {instance.id}) detected via {via}")
+        try:
+            cfg = _find_plugin_config(enabled_only=True)
+            if not cfg:
+                LOGGER.warning(
+                    "EPG & Sports Editor: no enabled plugin settings found under keys "
+                    f"{_candidate_plugin_keys()} — post-refresh processing skipped"
+                )
+                return
+            settings = cfg.settings
+        except Exception as e:
+            LOGGER.warning(f"EPG & Sports Editor: could not read settings after refresh: {e}")
+            return
+
+        if settings.get(f"src_{instance.id}_enabled", False):
+            LOGGER.info(f"EPG & Sports Editor: '{instance.name}' refreshed — transforming")
+            try:
+                self._do_transform_source(instance, settings, _reparse="after_refresh")
+            except Exception as e:
+                LOGGER.error(f"EPG & Sports Editor: transform failed for '{instance.name}': {e}")
+        else:
+            LOGGER.info(
+                f"EPG & Sports Editor: '{instance.name}' (id {instance.id}) refreshed but is not enabled "
+                "in the plugin's settings — no virtual EPG copy made"
+            )
+
+        if settings.get("fill_groups", "").strip():
+            LOGGER.info(f"EPG & Sports Editor: running Fill EPG after '{instance.name}' refresh")
+            try:
+                self._action_fill_epg(settings, LOGGER)
+            except Exception as e:
+                LOGGER.error(f"EPG & Sports Editor: auto Fill EPG failed: {e}")
+
+    def _action_on_epg_refresh(self, settings, logger, params=None):
+        """Dispatcharr's `epg_refresh` event hook (declared in plugin.json). The event
+        payload names the source that just finished refreshing."""
+        from apps.epg.models import EPGSource
+        payload = (params or {}).get("payload") or {}
+        name = payload.get("source_name")
+        if not name:
+            return {"success": True, "message": "Runs automatically after an EPG source refreshes; nothing to do when clicked."}
+        source = EPGSource.objects.filter(name=name).first()
+        if not source:
+            LOGGER.warning(f"EPG & Sports Editor: epg_refresh event for unknown source '{name}'")
+            return {"success": False, "message": f"Unknown EPG source '{name}'"}
+        self._after_source_refresh(source, "epg_refresh event")
+        return {"success": True, "message": f"Handled refresh of '{name}'"}
+
     def _connect_signal(self):
         from apps.epg.models import EPGSource
         from django.db.models.signals import post_save
 
         def _on_epg_refresh(sender, instance, **kwargs):
-            if instance.source_type == "dummy" or instance.name.startswith(VIRTUAL_PREFIX):
-                return
             update_fields = kwargs.get("update_fields")
             status_saved = update_fields is None or "status" in (update_fields or [])
             if not status_saved or instance.status != "success":
                 return
-            LOGGER.info(f"EPG & Sports Editor: refresh signal fired for '{instance.name}' (id {instance.id})")
-            try:
-                cfg = _find_plugin_config(enabled_only=True)
-                if not cfg:
-                    LOGGER.warning(
-                        "EPG & Sports Editor: no enabled plugin settings found under keys "
-                        f"{_candidate_plugin_keys()} — post-refresh processing skipped"
-                    )
-                    return
-                settings = cfg.settings
-            except Exception as e:
-                LOGGER.warning(f"EPG & Sports Editor: signal could not read settings: {e}")
-                return
-
-            if not settings.get(f"src_{instance.id}_enabled", False):
-                LOGGER.info(
-                    f"EPG & Sports Editor: '{instance.name}' (id {instance.id}) refreshed but is not enabled "
-                    "in the plugin's settings — no virtual EPG copy made"
-                )
-            if settings.get(f"src_{instance.id}_enabled", False):
-                LOGGER.info(f"EPG & Sports Editor: '{instance.name}' refreshed — transforming")
-                try:
-                    self._do_transform_source(instance, settings, _reparse="after_refresh")
-                except Exception as e:
-                    LOGGER.error(f"EPG & Sports Editor: transform failed for '{instance.name}': {e}")
-
-            if settings.get("fill_groups", "").strip():
-                LOGGER.info(f"EPG & Sports Editor: running Fill EPG after '{instance.name}' refresh")
-                try:
-                    self._action_fill_epg(settings, LOGGER)
-                except Exception as e:
-                    LOGGER.error(f"EPG & Sports Editor: auto Fill EPG failed: {e}")
+            self._after_source_refresh(instance, "signal")
 
         post_save.connect(
             _on_epg_refresh,
@@ -3537,7 +3569,7 @@ class Plugin:
         SOURCE's own programs fresh"): "after_refresh" (the source was just refreshed —
         always re-parse entries Dispatcharr skipped), "stale" (manual runs — only when
         they're about to run out), "never" (the re-copy that follows a re-parse)."""
-        from apps.epg.models import EPGData, ProgramData
+        from apps.epg.models import EPGData, EPGSource, ProgramData
         from apps.channels.models import Channel
 
         virtual, _ = self._get_or_create_virtual(source)
@@ -3647,6 +3679,16 @@ class Plugin:
                 total += len(batch)
 
         _invalidate_epg_output_cache()
+        # Visible proof in Dispatcharr's EPG Sources list that the copy ran (and when) —
+        # a queryset update, so it fires no signals.
+        try:
+            from django.utils import timezone as _tz
+            EPGSource.objects.filter(pk=virtual.pk).update(
+                status="success", updated_at=_tz.now(),
+                last_message=f"Copied {total:,} programs from '{source.name}' at {_tz.now():%Y-%m-%d %H:%M} UTC",
+            )
+        except Exception as e:
+            LOGGER.debug(f"EPG & Sports Editor: could not stamp virtual source status: {e}")
         n_channels = len(assigned_tvg_ids) if assigned_tvg_ids else "all"
         LOGGER.info(
             f"EPG & Sports Editor: '{source.name}' — {total} programs written "
@@ -3672,6 +3714,7 @@ class Plugin:
             "sports_editor_rename_now": self._action_sports_editor_rename_now,
             "sports_editor_epg_now":  self._action_sports_editor_epg_now,
             "restart_dispatcharr":    self._action_restart_dispatcharr,
+            "on_epg_refresh":         lambda st, lg: self._action_on_epg_refresh(st, lg, params),
         }
         handler = handlers.get(action)
         if not handler:
