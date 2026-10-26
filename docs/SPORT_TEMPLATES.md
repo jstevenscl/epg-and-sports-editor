@@ -1,8 +1,25 @@
 # Sport Templates Guide
 
+[← Back to the README](../README.md#documentation) · [Actions Reference](../README.md#actions-reference) · [Settings Reference](../README.md#settings-reference) · [FAQ](../README.md#faq)
+
 A step-by-step walkthrough for turning auto-created sports channels into fully renamed, logo'd channels with real Pregame/Live/Postgame EPG data — driven by a public live sports schedule.
 
 > This feature builds on the [Sports Editor](../README.md#sports-editor)'s per-channel-group Rename Rules. If you haven't set those up yet, do that first — see the README's [Quick Start — Sports Editor](../README.md#quick-start--sports-editor).
+
+**On this page:**
+[How it works](#how-it-works-in-one-paragraph) ·
+[Prerequisites](#prerequisites) ·
+[Step 1 — Enable the Sports Editor](#step-1--enable-the-sports-editor-for-your-channel-group) ·
+[Step 2 — Pick a Sport Template](#step-2--pick-a-sport-template) ·
+[Step 3 — Review the templates](#step-3--review-or-customize-that-sports-templates) ·
+[Step 4 — Run it](#step-4--run-it) ·
+[Step 5 — Check your TV Guide](#step-5--check-your-tv-guide) ·
+[The matching engine](#the-matching-engine-explained) ·
+[Full League List](#full-league-list) ·
+[Variable Reference](#full-variable-reference) ·
+[Game Thumbs & Logos](#game-thumbs--logo-url-parameters) ·
+[Starter Templates](#starter-templates-per-league) ·
+[Troubleshooting](#troubleshooting)
 
 ---
 
@@ -425,6 +442,12 @@ Fixed in v0.5.03 for the `4K - SNF`/`HD MNF:`/bare `TNF` shape (`NFL | 4K - SNF 
 
 **College football channels like `B1G Football - Purdue at Illinois` or `Football - UTEP at New Mexico` don't match.**
 Fixed in v0.5.08: a leading conference/league tag plus the word *Football* and a dash (`B1G Football - `, `Football - `, `SEC Football: `, `American Football NCAA Football `) is now recognized as decoration, and a time glued to the end of a team name (`UC Davis 10pm`) is stripped. As always, if you have a channel shape that still doesn't match, send the exact raw channel name.
+
+---
+
+## Still stuck?
+
+Check the [README FAQ](../README.md#faq) — it has an entry for most reported problems, including channels that won't match, wrong-date matches and hidden channels — and the [Actions Reference](../README.md#actions-reference) for what each button does. If your problem isn't covered, [open an issue](https://github.com/jstevenscl/epg-and-sports-editor/issues) and include the **exact raw channel name** and the relevant Dispatcharr log lines.
 
 ---
 

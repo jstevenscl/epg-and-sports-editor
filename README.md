@@ -8,6 +8,22 @@ A [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) plugin that creates 
 
 ---
 
+## Documentation
+
+| I want to… | Go to |
+|---|---|
+| **Install the plugin** | [Installation](#installation) |
+| **Clean up titles / sub-titles in my EPG** | [Quick Start — EPG Transformation](#quick-start--epg-transformation), then [Rule Format](#rule-format) |
+| **Fill channels that have no EPG** | [Quick Start — Fill EPG](#quick-start--fill-epg) |
+| **Rename and schedule sports channels** | [Quick Start — Sports Editor](#quick-start--sports-editor) |
+| **Get real game names, logos and Pregame/Live/Postgame guide blocks** | **[Sport Templates Guide](docs/SPORT_TEMPLATES.md)** — full walkthrough, variables, matching engine, starter templates for 93 leagues |
+| **Know what every button does** | [Actions Reference](#actions-reference) |
+| **Know what every setting does** | [Settings Reference](#settings-reference) |
+| **Test or design a rule** | [Rule Tester](#rule-tester) · [Rule Designer](#rule-designer) |
+| **Fix something that isn't working** | [FAQ](#faq) · [Sport Templates Troubleshooting](docs/SPORT_TEMPLATES.md#troubleshooting) · [open an issue](https://github.com/jstevenscl/epg-and-sports-editor/issues) |
+
+---
+
 ## What It Does
 
 ### EPG Transformation
@@ -181,7 +197,7 @@ Want real channel names, logos, and a Pregame/Live/Postgame EPG instead of just 
 | Button | What it does |
 |---|---|
 | **Setup** | First time you enable a source, or after adding a new source. Creates the virtual EPG and reassigns channels. |
-| **Apply Now** | After changing rules — re-runs the transform immediately without waiting for the next EPG refresh. |
+| **Apply Now** | After changing rules — re-runs the transform immediately without waiting for the next EPG refresh. If it takes longer than about 35 seconds it keeps going in the background (so the Dispatcharr page never shows a 504) and the per-source counts go to the log (v0.5.14+). |
 | **Preview** | Dry-run your current rules. Shows before/after for affected programs. No changes made. |
 | **Sample Data** | Discover what tags/patterns exist in your sources. Run this before writing rules. |
 | **Test Rule** | Test a single rule against live data from any source and field. Uses the Rule Tester settings. |
@@ -191,7 +207,10 @@ Want real channel names, logos, and a Pregame/Live/Postgame EPG instead of just 
 | **Run Sport Templates Now** | Match each Sport-Template-enabled group's auto-created channels against the live schedule right now — renames matches, assigns logos, and generates Pregame/Live/Postgame EPG data. |
 | **Show Status** | Shows which sources are enabled, program counts, Fill EPG status, and configured rules. |
 | **Teardown** | Removes all virtual EPG sources (including Fill EPG) and reassigns channels back to their originals. |
+| **Clear Stuck EPG Refreshes** | Use when an EPG source never refreshes and the Dispatcharr log repeats `Deferring refresh … per-channel program parses in progress`. Clears Dispatcharr's stuck parse counter, but only when no parse is actually running. Also done automatically after every refresh and Apply Now (v0.5.14+). See the [FAQ](#faq). |
 | **Restart Dispatcharr** | Reloads Dispatcharr's backend process so it picks up a plugin update — run this after every EPG & Sports Editor install/update. Not a full container restart; the page goes offline for about 15 seconds. |
+
+![Lower half of the Actions tab, including Clear Stuck EPG Refreshes](docs/screenshots/02b_actions_maintenance.png)
 
 ---
 
@@ -487,6 +506,12 @@ Fixed in v0.5.08. Once Setup moves your channels onto the virtual EPG, Dispatcha
 
 **College football channels like `B1G Football - Purdue at Illinois` or `Football - UTEP at New Mexico` don't match.**
 Fixed in v0.5.08: a leading conference/league tag plus the word *Football* and a dash (`B1G Football - `, `Football - `, `SEC Football: `, `American Football NCAA Football `) is now recognized as decoration, and a time glued to the end of a team name (`UC Davis 10pm`) is stripped. As always, if you have a channel shape that still doesn't match, send the exact raw channel name.
+
+**An EPG source never refreshes and the Dispatcharr log keeps repeating "Deferring refresh … per-channel program parses in progress".**
+Handled in v0.5.14. Dispatcharr holds back a source's refresh while a counter in Redis says per-channel program parses are running for it. If a parse is cut off partway — a worker or the container restarting, a process being killed — the counter never counts back down, and that source's refresh waits forever; before this, only restarting the Dispatcharr container cleared it. The plugin now checks for this and clears the counter by itself after every EPG refresh and every **Apply Now**, or you can press **Clear Stuck EPG Refreshes** on the Actions tab. It only clears a counter when no parse is actually running, so it never interrupts real work. A killed parse's lock can take up to about 5 minutes to expire — if the button says a lock is still held, wait a few minutes and press it again. If it keeps coming back, please [open an issue](https://github.com/jstevenscl/epg-and-sports-editor/issues) with the Dispatcharr log lines from just before the first "Deferring refresh" line.
+
+**Apply Now shows a 504 / gateway timeout error in the Dispatcharr UI.**
+Fixed in v0.5.14. The reverse proxy in front of Dispatcharr gives up on a request after about 50 seconds, but the plugin kept working anyway, so the UI showed an error for a run that actually succeeded. Apply Now now waits up to 35 seconds and answers with the normal per-source counts; if the run is bigger than that it tells you it is finishing in the background (no need to click again) and writes the counts to the Dispatcharr log. Re-parsing a source's own stale programs also now happens in the background instead of inside the request.
 
 **Where did SiriusXM channel management go?**
 It's been removed from EPG & Sports Editor as of this version — see the note at the top of this README and the release notes. Active SiriusXM development (Now Playing overlays, logos, and a more advanced EPG) is now in the [Ticker](https://github.com/jstevenscl/ticker) plugin.
