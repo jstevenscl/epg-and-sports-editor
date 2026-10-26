@@ -12,6 +12,7 @@ import collections
 import logging
 import os
 import re
+import threading
 import unicodedata
 from functools import lru_cache
 from django.db import transaction
@@ -947,7 +948,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.13"
+    version = "0.5.14"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1709,6 +1710,7 @@ class Plugin:
         except Exception:
             pass   # no usable cache: worst case is one redundant, idempotent transform
         LOGGER.info(f"EPG & Sports Editor: refresh of '{instance.name}' (id {instance.id}) detected via {via}")
+        self._heal_stuck_parse_counters()   # unblock any source whose refresh a killed parse left deferred
         try:
             cfg = _find_plugin_config(enabled_only=True)
             if not cfg:
@@ -3416,7 +3418,9 @@ class Plugin:
     # those unmapped-but-still-needed entries itself (force=True parses an entry
     # whether or not a channel maps to it) before copying.
     REPARSE_IF_ENDS_WITHIN_HOURS = 12
+    APPLY_WAIT_SECS = 35                  # stay under nginx's ~50s before answering the UI
     _reparse_in_flight = set()
+    _reparse_lock = threading.Lock()      # one background re-parse at a time per process
 
     @staticmethod
     def _source_entries_needing_reparse(source, entries, only_if_stale):
@@ -3484,26 +3488,109 @@ class Plugin:
         from django.db import connection
         from apps.epg.models import EPGSource
         try:
-            if wait_for_refresh:
-                deadline = time.time() + 900
-                while time.time() < deadline and self._source_refresh_running(source_id):
-                    time.sleep(3)
-            n = self._reparse_source_entries(epg_ids)
-            cfg = _find_plugin_config(enabled_only=True)
-            if not cfg:
-                return
-            source = EPGSource.objects.get(pk=source_id)
-            LOGGER.info(
-                f"EPG & Sports Editor: '{source.name}' — re-parsed {n}/{len(epg_ids)} EPG entries Dispatcharr "
-                "no longer refreshes on its own (their channels moved to the virtual EPG); re-copying"
-            )
-            self._do_transform_source(source, cfg.settings, _reparse="never")
+            with self._reparse_lock:
+                if wait_for_refresh:
+                    deadline = time.time() + 900
+                    while time.time() < deadline and self._source_refresh_running(source_id):
+                        time.sleep(3)
+                n = self._reparse_source_entries(epg_ids)
+                cfg = _find_plugin_config(enabled_only=True)
+                if not cfg:
+                    return
+                source = EPGSource.objects.get(pk=source_id)
+                LOGGER.info(
+                    f"EPG & Sports Editor: '{source.name}' — re-parsed {n}/{len(epg_ids)} EPG entries Dispatcharr "
+                    "no longer refreshes on its own (their channels moved to the virtual EPG); re-copying"
+                )
+                self._do_transform_source(source, cfg.settings, _reparse="never")
         except Exception as e:
             LOGGER.error(f"EPG & Sports Editor: re-parse/re-transform failed for source {source_id}: {e}")
         finally:
             self._reparse_in_flight.discard(source_id)
-            if wait_for_refresh:
-                connection.close()      # this ran on our own thread — don't leak its DB connection
+            connection.close()      # this ran on our own thread — don't leak its DB connection
+
+    # ── Dispatcharr's per-source parse counter ────────────────────────────
+    # Dispatcharr defers a source's refresh ("per-channel program parses in progress")
+    # while the Redis counter epg_source_tvg_parse_<id> is above zero. It is raised when a
+    # per-entry parse starts and lowered in that parse's `finally`, with no expiry — so a
+    # parse killed mid-run (worker recycled or restarted, request torn down) leaves it
+    # raised and the source's refreshes defer until Redis is cleared. A counter is stale
+    # when no parse holds a lock for any of the source's entries.
+    PARSE_COUNTER_PATTERN = "epg_source_tvg_parse_*"
+
+    @staticmethod
+    def _heal_stuck_parse_counters(recheck_secs=5, waiting=None):
+        """Delete parse counters nothing is working on. Returns [(source_id, value)] cleared.
+        Raised counters that still have a live parse/refresh lock are appended to `waiting`
+        if given — a killed parse's lock lingers up to ~5 min, so they may clear later."""
+        import time
+        try:
+            from core.utils import RedisClient
+            from apps.epg.models import EPGData
+            client = RedisClient.get_client()
+            if client is None:
+                return []
+
+            def stale_ids(busy_out=None):
+                out = {}
+                for key in client.scan_iter(match=Plugin.PARSE_COUNTER_PATTERN):
+                    key = key.decode() if isinstance(key, bytes) else key
+                    try:
+                        sid = int(key.rsplit("_", 1)[1])
+                        value = int(client.get(key) or 0)
+                    except (ValueError, TypeError):
+                        continue
+                    if value <= 0:
+                        continue
+                    locks = [
+                        f"task_lock_parse_epg_programs_{eid}"
+                        for eid in EPGData.objects.filter(epg_source_id=sid).values_list("id", flat=True)
+                    ]
+                    busy = bool(client.exists(f"task_lock_refresh_epg_data_{sid}")) or any(
+                        client.exists(*locks[i:i + 500]) for i in range(0, len(locks), 500)
+                    )
+                    if not busy:
+                        out[sid] = (key, value)
+                    elif busy_out is not None:
+                        busy_out.append((sid, value))
+                return out
+
+            first = stale_ids(waiting)
+            if not first:
+                return []
+            time.sleep(recheck_secs)        # a parse is between its counter raise and lock grab for ms only
+            healed = []
+            for sid, (key, value) in stale_ids().items():
+                if sid in first:
+                    client.delete(key)
+                    healed.append((sid, value))
+                    LOGGER.warning(
+                        f"EPG & Sports Editor: cleared stuck parse counter for EPG source {sid} "
+                        f"(was {value}, no parse running) — its refreshes can proceed again"
+                    )
+            return healed
+        except Exception as e:
+            LOGGER.warning(f"EPG & Sports Editor: could not check parse counters: {e}")
+            return []
+
+    def _action_clear_parse_counters(self, settings, logger):
+        waiting = []
+        healed = self._heal_stuck_parse_counters(waiting=waiting)
+        if not healed and waiting:
+            return {"success": True, "message": (
+                f"{len(waiting)} source(s) have a raised parse counter, but a parse or refresh lock is still held, "
+                "so it isn't safe to clear yet. If a parse was killed, its lock expires on its own within about "
+                "5 minutes — run this again then (or just wait: it is also cleared automatically after the "
+                "next refresh or Apply Rules)."
+            )}
+        if not healed:
+            return {"success": True, "message": "No stuck parse counters found — nothing to clear."}
+        from apps.epg.models import EPGSource
+        names = dict(EPGSource.objects.filter(pk__in=[sid for sid, _ in healed]).values_list("pk", "name"))
+        lines = [f"Cleared {len(healed)} stuck parse counter(s):"]
+        lines += [f"  {names.get(sid, sid)} (was {value})" for sid, value in healed]
+        lines.append("Deferred EPG refreshes retry every 15 seconds and will proceed on their own.")
+        return {"success": True, "message": "\n".join(lines)}
 
     def _reassign_channels_to_virtual(self, source, settings):
         """Point channels still mapped to the ORIGINAL `source` (within the configured
@@ -3648,22 +3735,22 @@ class Plugin:
             source_entries = EPGData.objects.filter(epg_source=source)
 
         if assigned_tvg_ids and _reparse != "never":
+            self._heal_stuck_parse_counters()
             need = self._source_entries_needing_reparse(
                 source, list(source_entries), only_if_stale=(_reparse != "after_refresh")
             )
-            if need and self._source_refresh_running(source.id):
-                # Called from the post-refresh signal, i.e. inside Dispatcharr's own
-                # refresh task: parsing now would only defer. Copy what exists now and
-                # let a worker re-parse + re-copy once the refresh has finished.
-                if source.id not in self._reparse_in_flight:
-                    self._reparse_in_flight.add(source.id)
-                    import threading
-                    threading.Thread(
-                        target=self._reparse_and_retransform, args=(source.id, need, True),
-                        name=f"epg-sports-editor-reparse-{source.id}", daemon=True,
-                    ).start()
-            elif need:
-                self._reparse_source_entries(need)
+            if need and source.id not in self._reparse_in_flight:
+                # Never parse inline: a manual run is an HTTP request that nginx cuts off
+                # after ~50s, and an interrupted parse leaves Dispatcharr's per-source
+                # parse counter raised, which defers that source's refreshes. Copy what
+                # exists now; a worker re-parses (waiting out any refresh in progress),
+                # then re-copies.
+                self._reparse_in_flight.add(source.id)
+                import threading
+                threading.Thread(
+                    target=self._reparse_and_retransform, args=(source.id, need, True),
+                    name=f"epg-sports-editor-reparse-{source.id}", daemon=True,
+                ).start()
 
         # An entry whose source programs are gone (Dispatcharr's orphan cleanup drops
         # them for entries no channel maps to; a re-parse may not have landed yet) must
@@ -3766,6 +3853,7 @@ class Plugin:
             "sports_editor_rename_now": self._action_sports_editor_rename_now,
             "sports_editor_epg_now":  self._action_sports_editor_epg_now,
             "restart_dispatcharr":    self._action_restart_dispatcharr,
+            "clear_parse_counters":   self._action_clear_parse_counters,
             "on_epg_refresh":         lambda st, lg: self._action_on_epg_refresh(st, lg, params),
             "on_m3u_refresh":         lambda st, lg: self._action_on_m3u_refresh(st, lg, params),
         }
@@ -3807,10 +3895,34 @@ class Plugin:
         enabled = self._get_enabled_sources(settings)
         if not enabled:
             return {"success": False, "message": "No sources enabled."}
+        # This is an HTTP request and nginx cuts it off at ~50s (a 504 in the UI) however
+        # long the work takes, so do it on a worker and report back only if it finishes in
+        # time; otherwise it carries on and the result goes to the log.
         lines = ["Transform complete:\n"]
-        for source in enabled:
-            total = self._do_transform_source(source, settings)
-            lines.append(f"  {source.name}: {total:,} programs written")
+        failure = []
+
+        def work():
+            from django.db import connection
+            try:
+                for source in enabled:
+                    total = self._do_transform_source(source, settings)
+                    lines.append(f"  {source.name}: {total:,} programs written")
+            except Exception as e:
+                failure.append(e)
+                LOGGER.exception("EPG & Sports Editor: Apply Rules failed")
+            finally:
+                connection.close()
+
+        worker = threading.Thread(target=work, name="epg-sports-editor-apply", daemon=True)
+        worker.start()
+        worker.join(self.APPLY_WAIT_SECS)
+        if failure:
+            raise failure[0]
+        if worker.is_alive():
+            return {"success": True, "message": (
+                "Apply Rules is taking a while, so it is finishing in the background — no need to run it again. "
+                "Progress and the final per-source counts are in the Dispatcharr log."
+            )}
         return {"success": True, "message": "\n".join(lines)}
 
     def _action_sample(self, settings, logger):
