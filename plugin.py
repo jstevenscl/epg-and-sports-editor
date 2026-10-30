@@ -187,14 +187,16 @@ def _postgame_hours(settings):
 SDP_CACHE_STALE_TTL_SECS = 24 * 60 * 60
 
 # Tracks which Channel ids the "Hide auto-created channels with a past date in
-# their name" feature has itself hidden (Channel.hidden_from_output=True), kept
-# OUT of PluginConfig.settings for the same reason SDP_CACHE_KEY is (avoids
-# bloating the settings blob Dispatcharr round-trips on every save). A long TTL
-# rather than none: if it's ever evicted, the only loss is the date-based
-# fallback un-hide path (see _apply_past_date_hide) — a channel that gets a real
-# Sport Template match again is always un-hidden regardless of this cache.
+# their name" feature has itself hidden (Channel.hidden_from_output=True). This is
+# the ONLY thing that lets the plugin tell its own hides from a user's manual ones,
+# so it must be durable: it lives in the Sports Editor EPGSource's custom_properties
+# (Postgres), NOT in the cache — Dispatcharr's bundled Redis has no persistence, so a
+# container restart/update used to wipe the set while hidden_from_output stayed True,
+# leaving matched/EPG'd channels hidden forever with no way to un-hide them. Also kept
+# out of PluginConfig.settings (the plugin UI round-trips and can overwrite that blob).
+HIDDEN_PAST_CHANNELS_PROP_KEY = "hidden_past_channel_ids"
+# Pre-v0.5.15 location, read once to migrate then deleted.
 HIDDEN_PAST_CHANNELS_CACHE_KEY = "epg_and_sports_editor_hidden_past_channels"
-HIDDEN_PAST_CHANNELS_CACHE_TTL_SECS = 60 * 24 * 60 * 60
 # Grace period after a channel's embedded date/time before it counts as "past" —
 # absorbs the coarse timezone/DST approximation in _parse_embedded_datetime.
 # Measured from the game's START time as stated in the channel name, not from its end.
@@ -608,10 +610,23 @@ def _parse_embedded_datetime(text):
 # scoreboard row is missing) — and both appear in the Sport Template dropdown, so a
 # user picking either one must see games from both. Team-vs-team ranking already
 # prefers the complete scoreboard row (see _find_sdp_event).
+#
+# College volleyball is split the same way: "ncaa-volleyball" is the full ESPN scoreboard
+# (abbreviations, team ids, logos), while "ncaa-womens-volleyball" is only the ESPN+ watch
+# feed (381 rows vs 1383, no abbreviations, short school names). Choosing the Women's
+# template used to search only the watch rows, so most channels matched nothing or rendered
+# without logos.
 _SPORT_SLUG_POOL = {
     "ncaa-football": ("ncaa-football", "ncaaf"),
     "ncaaf": ("ncaaf", "ncaa-football"),
+    "ncaa-womens-volleyball": ("ncaa-womens-volleyball", "ncaa-volleyball"),
+    "ncaa-volleyball": ("ncaa-volleyball", "ncaa-womens-volleyball"),
 }
+
+# SDP league_slug -> the slug game-thumbs actually serves. game-thumbs has no
+# "ncaa-volleyball" (HTTP 400 for every team); the same games live under
+# "ncaa-womens-volleyball".
+_GAMETHUMBS_SLUG_ALIASES = {"ncaa-volleyball": "ncaa-womens-volleyball"}
 
 # ── Network Channels ────────────────────────────────────────────────────────────
 # A "Network Channel" is a channel that names a broadcast network instead of two
@@ -803,6 +818,10 @@ _MATCHUP_LEAD_RES = [
 ]
 _MATCHUP_RANK_RE = re.compile(r"^\s*(?:#\d{1,2}|\(\d{1,2}\)|No\.\s*\d{1,2})\s+", re.IGNORECASE)
 _MATCHUP_TRAIL_RES = [
+    re.compile(                                                                      # " on Saturday Oct 31 at 5:00 AM NZDT" (an abbreviated school name like "Iona" can't absorb the leftover "on Saturday")
+        r"\s+on\s+(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b\.?,?\s+\S.*$",
+        re.IGNORECASE,
+    ),
     re.compile(                                                                      # "(Spanish)" "(NHLN Feed )" "(2026-09-26 19:25)"
         r"\s*\((?=[^)]*(?:\d|feed|spanish|french|english|portuguese|\bhd\b|\balt\b|espn|arena|cast|home|away|national|\bfox\b|\babc\b|\bcbs\b|\bnbc\b|sports|network|peacock|prime|\btnt\b|\btbs\b))[^)]*\)\s*$",
         re.IGNORECASE,
@@ -948,7 +967,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.14"
+    version = "0.5.15"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -2832,7 +2851,7 @@ class Plugin:
             "loser": loser,
             "score_line": score_line,
             "league": event.get("league_name") or league_label,
-            "league_slug": event.get("league_slug") or "",
+            "league_slug": _GAMETHUMBS_SLUG_ALIASES.get(event.get("league_slug"), event.get("league_slug") or ""),
             "gamethumbs_base": (gamethumbs_base or "").rstrip("/"),
             "phase": phase,
             "tournament_name": tournament_name,
@@ -2906,21 +2925,52 @@ class Plugin:
                 result.append((group, sport))
         return result
 
-    @staticmethod
-    def _get_hidden_past_channel_ids():
+    def _load_hidden_past_state(self, epg_source):
+        """(working_set, persisted_snapshot). `working_set` is mutated by
+        _apply_past_date_hide; `persisted_snapshot` is what the DB held at load time,
+        so _save_hidden_past_state can write only this pass's additions/removals. Ids
+        still in the pre-v0.5.15 cache key are folded into the working set so they get
+        migrated into the DB on the next save."""
         from django.core.cache import cache
-        return set(cache.get(HIDDEN_PAST_CHANNELS_CACHE_KEY) or ())
+        persisted = set((epg_source.custom_properties or {}).get(HIDDEN_PAST_CHANNELS_PROP_KEY) or ())
+        working = set(persisted)
+        try:
+            working |= set(cache.get(HIDDEN_PAST_CHANNELS_CACHE_KEY) or ())
+        except Exception:
+            pass
+        return working, persisted
 
-    @staticmethod
-    def _set_hidden_past_channel_ids(ids):
+    def _save_hidden_past_state(self, epg_source, working, persisted):
+        """Persist this pass's delta (not the whole set) under a row lock, so two
+        passes running at once (several M3U refreshes finishing together, or a manual
+        run) can't overwrite each other's additions. Drops ids of deleted channels."""
         from django.core.cache import cache
-        cache.set(HIDDEN_PAST_CHANNELS_CACHE_KEY, set(ids), timeout=HIDDEN_PAST_CHANNELS_CACHE_TTL_SECS)
+        from django.db import transaction
+        from apps.epg.models import EPGSource
+        from apps.channels.models import Channel
+
+        added, removed = working - persisted, persisted - working
+        with transaction.atomic():
+            src = EPGSource.objects.select_for_update().get(pk=epg_source.pk)
+            props = dict(src.custom_properties or {})
+            current = set(props.get(HIDDEN_PAST_CHANNELS_PROP_KEY) or ())
+            merged = (current | added) - removed
+            if merged:
+                merged = set(Channel.objects.filter(pk__in=merged).values_list("pk", flat=True))
+            if merged != current:
+                props[HIDDEN_PAST_CHANNELS_PROP_KEY] = sorted(merged)
+                EPGSource.objects.filter(pk=src.pk).update(custom_properties=props)
+                epg_source.custom_properties = props
+        try:
+            cache.delete(HIDDEN_PAST_CHANNELS_CACHE_KEY)
+        except Exception:
+            pass
 
     @staticmethod
     def _apply_past_date_hide(ch, matched, hide_setting_on, hidden_ids, grace_hours=PAST_CHANNEL_GRACE_HOURS):
         """"Hide auto-created channels with a past date in their name" — opt-in per
         group. `hidden_ids` is the persistent set of Channel ids THIS feature has
-        hidden (see HIDDEN_PAST_CHANNELS_CACHE_KEY); mutated in place. Only ever
+        hidden (see HIDDEN_PAST_CHANNELS_PROP_KEY); mutated in place. Only ever
         un-hides a channel that's in that set — a channel a user hid manually for an
         unrelated reason is never touched, in either direction. Returns True if
         `hidden_ids` changed, so the caller knows to persist it."""
@@ -3202,7 +3252,7 @@ class Plugin:
             return {"matched": 0, "scanned": 0}
 
         epg_source = self._sports_editor_epg_source()
-        hidden_ids = self._get_hidden_past_channel_ids()
+        hidden_ids, hidden_persisted = self._load_hidden_past_state(epg_source)
         hidden_ids_changed = False
         grace_hours = _past_grace_hours(settings)
         matched = scanned = 0
@@ -3227,9 +3277,10 @@ class Plugin:
                     group, hide_setting_on, hidden_before, self._hidden_channel_snapshot(group.id),
                     hidden_ids, "auto",
                 )
-
-        if hidden_ids_changed:
-            self._set_hidden_past_channel_ids(hidden_ids)
+            # Same transaction as the hide/un-hide UPDATEs above, so the ownership marker
+            # and hidden_from_output can never disagree after a crash mid-pass.
+            if hidden_ids_changed or hidden_ids != hidden_persisted:
+                self._save_hidden_past_state(epg_source, hidden_ids, hidden_persisted)
         if matched:
             _invalidate_epg_output_cache()
         self._mark_epg_source_success(
@@ -3263,7 +3314,7 @@ class Plugin:
             }
 
         epg_source = self._sports_editor_epg_source()
-        hidden_ids = self._get_hidden_past_channel_ids()
+        hidden_ids, hidden_persisted = self._load_hidden_past_state(epg_source)
         hidden_ids_changed = False
         grace_hours = _past_grace_hours(settings)
         lines = []
@@ -3304,9 +3355,8 @@ class Plugin:
                     + (f", newly hidden {group_hidden}" if hide_setting_on else "")
                 )
                 lines.extend(examples)
-
-        if hidden_ids_changed:
-            self._set_hidden_past_channel_ids(hidden_ids)
+            if hidden_ids_changed or hidden_ids != hidden_persisted:
+                self._save_hidden_past_state(epg_source, hidden_ids, hidden_persisted)
         if total_matched:
             _invalidate_epg_output_cache()
         self._mark_epg_source_success(
@@ -3319,6 +3369,38 @@ class Plugin:
             + (f", {total_hidden} newly hidden (past date, no match)." if total_hidden else "."),
         )
         return {"success": True, "message": "\n".join(lines)}
+
+    def _action_release_orphaned_hidden(self, settings, logger):
+        """One-time cleanup for channels hidden by "Hide auto-created channels with a past
+        date" in plugin versions before v0.5.15, whose ownership record lived in Redis and
+        was lost on a Dispatcharr restart — leaving matched, EPG'd channels hidden with no
+        way to un-hide them. Un-hides every hidden auto-created channel in a Sports-Editor
+        group that carries THIS plugin's generated EPG and isn't tracked as hidden by the
+        date feature. Manual because a user could have hidden such a channel on purpose."""
+        from apps.channels.models import Channel
+
+        sport_groups = self._enabled_sport_template_groups(settings)
+        if not sport_groups:
+            return {"success": True, "message": "No channel groups have the Sports Editor enabled with a Sport Template — nothing to release."}
+        epg_source = self._sports_editor_epg_source()
+        tracked, _persisted = self._load_hidden_past_state(epg_source)
+        group_ids = [g.id for g, _ in sport_groups]
+        orphans = list(
+            Channel.objects.filter(
+                auto_created=True, channel_group_id__in=group_ids, hidden_from_output=True,
+                epg_data__tvg_id__startswith="epg-and-sports-editor-sports-",
+            ).exclude(pk__in=tracked).order_by("channel_group_id", "channel_number")
+        )
+        if not orphans:
+            return {"success": True, "message": "No orphaned hidden channels found."}
+        Channel.objects.filter(pk__in=[c.pk for c in orphans]).update(hidden_from_output=False)
+        for c in orphans:
+            LOGGER.info(f"EPG & Sports Editor: released orphaned hidden channel {c.id} '{c.name}'")
+        names = [f"  {c.name}" for c in orphans[:25]]
+        more = [f"  …and {len(orphans) - 25} more"] if len(orphans) > 25 else []
+        return {"success": True, "message": "\n".join(
+            [f"Un-hid {len(orphans)} channel(s) the past-date hide feature had left hidden:"] + names + more
+        )}
 
     def _get_source_field_rules(self, source_id, settings):
         return {
@@ -3852,6 +3934,7 @@ class Plugin:
             "fill_epg":               self._action_fill_epg,
             "sports_editor_rename_now": self._action_sports_editor_rename_now,
             "sports_editor_epg_now":  self._action_sports_editor_epg_now,
+            "release_orphaned_hidden": self._action_release_orphaned_hidden,
             "restart_dispatcharr":    self._action_restart_dispatcharr,
             "clear_parse_counters":   self._action_clear_parse_counters,
             "on_epg_refresh":         lambda st, lg: self._action_on_epg_refresh(st, lg, params),
