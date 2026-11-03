@@ -169,7 +169,8 @@ def _pregame_start(start_utc, settings):
     except Exception:
         pass
     if tz is None:
-        tz = timezone(timedelta(hours=-4 if 3 <= start_utc.month <= 11 else -5))   # US Eastern approximation
+        std = start_utc + timedelta(hours=-5)       # US Eastern, real DST rule (no tz database)
+        tz = timezone(timedelta(hours=-4 if _us_dst_active(std.year, std.month, std.day, std.hour) else -5))
     local = start_utc.astimezone(tz)
     midnight = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     return min(midnight, start_utc - timedelta(hours=SPORTS_PREGAME_MIDNIGHT_MIN_HOURS))
@@ -215,6 +216,32 @@ def _past_grace_hours(settings):
     except (TypeError, ValueError):
         return PAST_CHANNEL_GRACE_HOURS
     return max(0.0, min(PAST_CHANNEL_GRACE_HOURS_MAX, hours))
+
+
+GAME_START_PROP_KEY = "game_start_utc"
+
+
+def _generated_game_start(ch):
+    """Exact UTC kickoff recorded on this plugin's generated EPG for `ch`, or None.
+    Only trusted while the channel's name is still the one this plugin wrote (the EPG
+    entry's name is set to the rendered channel name on every match); a provider rename
+    since then means the stored game may no longer be the channel's game. None also for
+    rows written before this key existed — callers fall back to parsing the name."""
+    from datetime import datetime, timezone
+    from apps.epg.models import ProgramData
+    row = (
+        ProgramData.objects.filter(
+            epg__tvg_id=f"epg-and-sports-editor-sports-{ch.id}", epg__name=ch.name,
+            custom_properties__has_key=GAME_START_PROP_KEY,
+        ).order_by("start_time").first()
+    )
+    if row is None:
+        return None
+    try:
+        when = datetime.fromisoformat(str((row.custom_properties or {}).get(GAME_START_PROP_KEY)))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
 def _has_current_generated_epg(ch, now):
@@ -546,17 +573,89 @@ _MONTH_NUM = {m: i + 1 for i, m in enumerate(
 _US_TZ_DST_STD_OFFSET_HOURS = {"ET": (-4, -5), "CT": (-5, -6), "MT": (-6, -7), "PT": (-7, -8)}
 # Abbreviations that already say which side of DST they are — a fixed offset, no
 # month-based guess needed. "UK" is a provider shorthand for London local time.
+# Deliberate: CST = US Central Standard and PST = US Pacific Standard, the overwhelmingly
+# common meaning in US sports provider names (CST also means China/Cuba, PST Philippines —
+# not supported; a name this plugin wrote itself never needs these, see GAME_START_PROP_KEY).
 _FIXED_TZ_OFFSET_HOURS = {
     "EDT": -4, "EST": -5, "CDT": -5, "CST": -6, "MDT": -6, "MST": -7, "PDT": -7, "PST": -8,
     "UTC": 0, "GMT": 0, "BST": 1, "NZDT": 13, "NZST": 12, "AEDT": 11, "AEST": 10,
 }
 
 
-def _parse_embedded_datetime(text):
+def _nth_weekday_day(year, month, weekday, n):
+    """Day-of-month of the n-th `weekday` (Mon=0..Sun=6) of the month; n=-1 is the last."""
+    import calendar
+    days = [d for d, wd in calendar.Calendar().itermonthdays2(year, month) if d and wd == weekday]
+    return days[n]
+
+
+def _us_dst_active(year, month, day, hour):
+    """True if US daylight time is in effect for a LOCAL wall-clock moment. US DST runs
+    from the 2nd Sunday of March 02:00 to the 1st Sunday of November 02:00 — the old
+    "March through November" month test was wrong for the first days of November (DST
+    ended Nov 1 in 2026) and the first ~2 weeks of March."""
+    if month < 3 or month > 11:
+        return False
+    if 3 < month < 11:
+        return True
+    if month == 3:
+        start = _nth_weekday_day(year, 3, 6, 1)
+        return (day, hour) >= (start, 2)
+    end = _nth_weekday_day(year, 11, 6, 0)
+    return (day, hour) < (end, 2)
+
+
+def _uk_bst_active(year, month, day, hour):
+    """True if UK summer time is in effect: last Sunday of March 01:00 UTC to last
+    Sunday of October 01:00 UTC (approximated at the hour on local wall-clock)."""
+    if month < 3 or month > 10:
+        return False
+    if 3 < month < 10:
+        return True
+    if month == 3:
+        return (day, hour) >= (_nth_weekday_day(year, 3, 6, -1), 1)
+    return (day, hour) < (_nth_weekday_day(year, 10, 6, -1), 2)
+
+
+# Generic provider labels (no DST side stated) -> the IANA zone whose real rules apply.
+_GENERIC_TZ_LABEL_ZONES = {
+    "ET": "America/New_York", "CT": "America/Chicago", "MT": "America/Denver",
+    "PT": "America/Los_Angeles", "UK": "Europe/London",
+}
+DEFAULT_PROVIDER_TZ = "America/New_York"
+# A zone label that directly follows a time but is NOT one the parser understands.
+# Reading such a time as the provider/US-Eastern default is silently wrong by hours, so
+# _parse_embedded_datetime returns None for it instead (callers then never hide on it).
+# Deliberately a curated list, not "any capitals": "8:00 PM ESPN2" must stay parseable.
+# Ambiguous labels (IST, AST, ...) are included on purpose — they mean different zones
+# in different countries, so no lookup table could be right.
+_UNRECOGNIZED_TZ_LABEL_RE = re.compile(
+    r"\s*\(?(?:[+\-−]\d{1,2}(?::?\d{2})?"
+    r"|CEST|CET|EEST|EET|WEST|WET|MSK|IST|JST|KST|HKT|SGT|PHT|WIB|WITA|WIT|PKT|"
+    r"AST|ADT|AKST|AKDT|HST|HDT|NST|NDT|SAST|EAT|WAT|CAT|ACST|ACDT|AWST|AWDT|"
+    r"ChST|CHST|SST|GST|IRST|TRT|BRT|ART|CLT|COT|PET)\b"
+)
+
+
+def _provider_zone(name):
+    """ZoneInfo for an IANA name, or None if blank/unknown/zoneinfo unavailable."""
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(str(name).strip())
+    except Exception:
+        return None
+
+
+def _parse_embedded_datetime(text, provider_tz=None):
     """Best-effort UTC datetime parsed out of a raw provider channel name (e.g.
     "SEP 27 - 8:50 PM ET" or "27 Sep 01:05 PM ET"). Returns None if no recognizable
-    date/time is found. Assumes the current year, correcting for a Dec/Jan boundary
-    by picking whichever of {this year, last year, next year} lands closest to now."""
+    date/time is found — or if the time carries a zone label the parser doesn't
+    understand (CET, JST, "+03", ...), since guessing a zone there is wrong by hours.
+    A time with NO label is read in `provider_tz` (IANA name, default US Eastern).
+    Assumes the current year, correcting for a Dec/Jan boundary by picking whichever
+    of {this year, last year, next year} lands closest to now."""
     from datetime import datetime, timezone, timedelta
 
     for m in _EMBEDDED_DATETIME_RE.finditer(text or ""):
@@ -576,6 +675,8 @@ def _parse_embedded_datetime(text):
         hour, minute = int(m.group("hour")), int(m.group("minute"))
         if not month or not 1 <= month <= 12 or not 1 <= day <= 31 or hour > 23 or minute > 59:
             continue
+        if not tz_name and _UNRECOGNIZED_TZ_LABEL_RE.match(text[m.end():]):
+            return None
         break
     else:
         return None
@@ -583,18 +684,34 @@ def _parse_embedded_datetime(text):
         hour += 12
     elif ampm == "am" and hour == 12:
         hour = 0
-    if tz_name in _FIXED_TZ_OFFSET_HOURS:
-        offset_hours = _FIXED_TZ_OFFSET_HOURS[tz_name]
-    elif tz_name == "UK":
-        offset_hours = 1 if 3 <= month <= 10 else 0
-    else:
-        dst_off, std_off = _US_TZ_DST_STD_OFFSET_HOURS.get(tz_name or "ET", _US_TZ_DST_STD_OFFSET_HOURS["ET"])
-        offset_hours = dst_off if 3 <= month <= 11 else std_off
-    tz = timezone(timedelta(hours=offset_hours))
+
+    # Zone for this time: an explicit fixed label wins; a generic label (ET/CT/MT/PT/UK)
+    # uses that region's real rules; no label uses the configured provider zone.
+    zone = None
+    if tz_name not in _FIXED_TZ_OFFSET_HOURS:
+        zone = _provider_zone(_GENERIC_TZ_LABEL_ZONES.get(tz_name) if tz_name
+                              else (provider_tz or DEFAULT_PROVIDER_TZ))
+        if zone is None and not tz_name:
+            zone = _provider_zone(DEFAULT_PROVIDER_TZ)    # bad/unknown provider_tz setting
+
+    def _tz_for(year):
+        # Per-year, because DST start/end dates move with the calendar.
+        if tz_name in _FIXED_TZ_OFFSET_HOURS:
+            return timezone(timedelta(hours=_FIXED_TZ_OFFSET_HOURS[tz_name]))
+        if zone is not None:
+            return zone
+        # No tz database available: hand-rolled US/UK rules (US Eastern when unlabeled).
+        if tz_name == "UK":
+            off = 1 if _uk_bst_active(year, month, day, hour) else 0
+        else:
+            dst_off, std_off = _US_TZ_DST_STD_OFFSET_HOURS.get(tz_name or "ET", _US_TZ_DST_STD_OFFSET_HOURS["ET"])
+            off = dst_off if _us_dst_active(year, month, day, hour) else std_off
+        return timezone(timedelta(hours=off))
 
     now = datetime.now(timezone.utc)
     best = None
     for year in (now.year, now.year - 1, now.year + 1):
+        tz = _tz_for(year)
         try:
             candidate = datetime(year, month, day, hour, minute, tzinfo=tz)
         except ValueError:
@@ -967,7 +1084,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.15"
+    version = "0.5.16"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1349,8 +1466,8 @@ class Plugin:
                 "hours in the past — counted from the game's START time, not its end — AND it no longer "
                 "matches a game. A channel still inside its match window (game length + Postgame Window) "
                 "is never hidden, so with a long Postgame Window the channel hides when that window ends, "
-                "not at this number. Raise it if your provider's times are in a timezone the plugin can't "
-                "read (it assumes US Eastern when none is given)."
+                "not at this number. Times in the name are read in the zone the provider writes "
+                "(ET, CT, NZDT, ...); a time with no zone label is read as US Eastern."
             ),
         })
 
@@ -2685,9 +2802,15 @@ class Plugin:
         from datetime import timedelta
         _DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        is_dst = 3 <= dt_utc.month <= 11
-        et = dt_utc + timedelta(hours=-4 if is_dst else -5)
-        ct = dt_utc + timedelta(hours=-5 if is_dst else -6)
+        et_zone, ct_zone = _provider_zone("America/New_York"), _provider_zone("America/Chicago")
+        if et_zone is not None and ct_zone is not None:
+            et, ct = dt_utc.astimezone(et_zone), dt_utc.astimezone(ct_zone)
+        else:
+            # No tz database: hand-rolled US rule (decided on the standard-time wall clock).
+            std_et = dt_utc + timedelta(hours=-5)
+            is_dst = _us_dst_active(std_et.year, std_et.month, std_et.day, std_et.hour)
+            et = dt_utc + timedelta(hours=-4 if is_dst else -5)
+            ct = dt_utc + timedelta(hours=-5 if is_dst else -6)
 
         def fmt(d):
             hour = d.hour % 12 or 12
@@ -2967,7 +3090,8 @@ class Plugin:
             pass
 
     @staticmethod
-    def _apply_past_date_hide(ch, matched, hide_setting_on, hidden_ids, grace_hours=PAST_CHANNEL_GRACE_HOURS):
+    def _apply_past_date_hide(ch, matched, hide_setting_on, hidden_ids, grace_hours=PAST_CHANNEL_GRACE_HOURS,
+                              provider_tz=None):
         """"Hide auto-created channels with a past date in their name" — opt-in per
         group. `hidden_ids` is the persistent set of Channel ids THIS feature has
         hidden (see HIDDEN_PAST_CHANNELS_PROP_KEY); mutated in place. Only ever
@@ -2999,7 +3123,9 @@ class Plugin:
                 return True
             return False
 
-        when = _parse_embedded_datetime(ch.name)
+        # Exact kickoff this plugin stored when it matched the channel (zone-proof) beats
+        # parsing a time out of free text; the name parse is only for raw provider names.
+        when = _generated_game_start(ch) or _parse_embedded_datetime(ch.name, provider_tz)
         now = datetime.now(timezone.utc)
         is_past = when is not None and when < now - timedelta(hours=grace_hours)
         if is_past and _has_current_generated_epg(ch, now):
@@ -3220,7 +3346,12 @@ class Plugin:
             batch.append(ProgramData(
                 epg=epg_entry, start_time=b_start, end_time=b_end,
                 title=title or ch.name, sub_title=None, description=desc or None,
-                tvg_id=tvg_id, custom_properties={"icon": logo_url} if logo_url else {},
+                tvg_id=tvg_id,
+                # game_start_utc is the exact kickoff (from the schedule feed, always UTC), so a
+                # later hide decision never has to re-parse the local time this plugin rendered
+                # into the channel name (zone abbreviations like CET/JST/"+03" can't be read back).
+                custom_properties={**({"icon": logo_url} if logo_url else {}),
+                                   GAME_START_PROP_KEY: start.isoformat()},
             ))
         ProgramData.objects.bulk_create(batch)
 
@@ -3255,6 +3386,7 @@ class Plugin:
         hidden_ids, hidden_persisted = self._load_hidden_past_state(epg_source)
         hidden_ids_changed = False
         grace_hours = _past_grace_hours(settings)
+        provider_tz = None
         matched = scanned = 0
         with transaction.atomic():
             for group, sport in sport_groups:
@@ -3269,7 +3401,7 @@ class Plugin:
                         is_matched = self._process_sports_editor_channel(ch, sport, events, settings, epg_source)
                         if is_matched:
                             matched += 1
-                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours):
+                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours, provider_tz):
                             hidden_ids_changed = True
                     except Exception as e:
                         LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
@@ -3317,6 +3449,7 @@ class Plugin:
         hidden_ids, hidden_persisted = self._load_hidden_past_state(epg_source)
         hidden_ids_changed = False
         grace_hours = _past_grace_hours(settings)
+        provider_tz = None
         lines = []
         total_matched = total_scanned = total_hidden = 0
         with transaction.atomic():
@@ -3335,7 +3468,7 @@ class Plugin:
                             group_matched += 1
                             if len(examples) < 5:
                                 examples.append(f"  '{old_name}' -> '{ch.name}'")
-                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours):
+                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours, provider_tz):
                             hidden_ids_changed = True
                             if not was_hidden_by_us and ch.id in hidden_ids:
                                 group_hidden += 1
