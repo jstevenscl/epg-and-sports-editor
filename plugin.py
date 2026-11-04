@@ -18,6 +18,27 @@ from functools import lru_cache
 from django.db import transaction
 
 LOGGER = logging.getLogger("plugins.epg-and-sports-editor")
+
+
+def _ensure_log_visible():
+    """Dispatcharr's Celery workers start with the root logger at WARNING (the worker is
+    launched without `-l info`), and the scheduled M3U/EPG refresh — and therefore every
+    post-refresh Sports Editor pass, including the past-date hide — runs inside those
+    workers. Without this, all of this plugin's INFO lines ("hid channel", "un-hid",
+    "hide-state", ...) were silently dropped for any pass a scheduled refresh triggered.
+    Raises ONLY this plugin's logger to the level Dispatcharr is configured for (INFO by
+    default); an explicit quieter DISPATCHARR_LOG_LEVEL (warning/error) is respected, and
+    the web processes, already at INFO, are unaffected."""
+    try:
+        wanted = (os.environ.get("DISPATCHARR_LOG_LEVEL") or "info").strip().lower()
+        level = {"trace": logging.DEBUG, "debug": logging.DEBUG, "info": logging.INFO}.get(wanted)
+        if level is not None and LOGGER.getEffectiveLevel() > level:
+            LOGGER.setLevel(level)
+    except Exception:
+        pass
+
+
+_ensure_log_visible()
 VIRTUAL_PREFIX = "EPG & Sports Editor: "
 PLUGIN_KEY = "epg_and_sports_editor"
 
@@ -198,6 +219,8 @@ SDP_CACHE_STALE_TTL_SECS = 24 * 60 * 60
 HIDDEN_PAST_CHANNELS_PROP_KEY = "hidden_past_channel_ids"
 # Pre-v0.5.15 location, read once to migrate then deleted.
 HIDDEN_PAST_CHANNELS_CACHE_KEY = "epg_and_sports_editor_hidden_past_channels"
+# Diagnostic only: ids of hidden-but-not-ours channels already logged, so each is listed once.
+HIDDEN_UNTRACKED_SEEN_CACHE_KEY = "epg_and_sports_editor_hidden_untracked_seen"
 # Grace period after a channel's embedded date/time before it counts as "past" —
 # absorbs the coarse timezone/DST approximation in _parse_embedded_datetime.
 # Measured from the game's START time as stated in the channel name, not from its end.
@@ -1084,7 +1107,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.16"
+    version = "0.5.17"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1096,11 +1119,17 @@ class Plugin:
     def __init__(self):
         self._signal_uid = "epg_and_sports_editor_transform"
         self._m3u_signal_uid = "epg_and_sports_editor_sports_editor"
+        self._hide_audit_uid = "epg_and_sports_editor_hide_audit"
+        _ensure_log_visible()
         self._migrate_from_legacy_key()
         self.fields = self._build_fields()
         LOGGER.info("EPG & Sports Editor: initialized")
         self._connect_signal()
         self._connect_m3u_signal()
+        try:
+            self._connect_hide_audit_signal()
+        except Exception as e:                      # diagnostics must never break plugin load
+            LOGGER.warning(f"EPG & Sports Editor: hide-flag audit not connected: {e}")
 
     def _migrate_from_legacy_key(self):
         """One-time, non-destructive carryover from the pre-rename "epgeditarr"
@@ -1834,6 +1863,7 @@ class Plugin:
         Dispatcharr's own `epg_refresh` plugin event (the `on_epg_refresh` action). Either
         may be missing on a given install, so both call this; a short cache lock makes
         the second arrival a no-op."""
+        _ensure_log_visible()
         if instance.source_type == "dummy" or instance.name.startswith(VIRTUAL_PREFIX):
             return
         from django.core.cache import cache
@@ -1940,6 +1970,7 @@ class Plugin:
             status_saved = update_fields is None or "status" in (update_fields or [])
             if not status_saved or instance.status != "success":
                 return
+            _ensure_log_visible()       # Celery may have re-levelled logging after this module loaded
             LOGGER.info(f"EPG & Sports Editor: M3U refresh signal fired for '{instance.name}' (id {instance.id})")
             try:
                 cfg = _find_plugin_config(enabled_only=True)
@@ -1991,9 +2022,106 @@ class Plugin:
         post_save.disconnect(sender=M3UAccount, dispatch_uid=self._m3u_signal_uid)
         LOGGER.info("EPG & Sports Editor: sports editor M3U signal disconnected")
 
+    # ── Hide-flag audit (diagnostic only) ─────────────────────────────────
+    # Logs whenever ANY code saves a Channel with hidden_from_output going False -> True,
+    # with the process and a short call trace, so a channel that turns up hidden can be
+    # traced to its writer (this plugin, Dispatcharr's UI/API, another tool). It never
+    # changes anything. Limits: only ORM .save() is visible here — a queryset .update()
+    # (which this plugin's own hide uses, and logs itself) fires no signal; those show up
+    # in the per-pass "hidden, not ours" lines instead.
+    def _connect_hide_audit_signal(self):
+        from apps.channels.models import Channel
+        from django.db.models.signals import pre_save, post_save
+        import traceback
+
+        def _caller_summary():
+            frames = []
+            for fs in traceback.extract_stack()[:-3]:
+                fn = fs.filename.replace("\\", "/")
+                if "/django/db/" in fn or "/django/dispatch/" in fn or "/logging/" in fn:
+                    continue
+                frames.append(f"{fn.rsplit('/', 1)[-1]}:{fs.lineno} {fs.name}")
+            return " <- ".join(reversed(frames[-8:])) or "unknown"
+
+        def _pre(sender, instance, **kwargs):
+            try:
+                if not instance.pk or not instance.hidden_from_output:
+                    return
+                uf = kwargs.get("update_fields")
+                if uf is not None and "hidden_from_output" not in uf:
+                    return
+                instance._eps_prev_hidden = (
+                    Channel.objects.filter(pk=instance.pk).values_list("hidden_from_output", flat=True).first()
+                )
+            except Exception:
+                pass
+
+        def _post(sender, instance, created, **kwargs):
+            try:
+                if not instance.hidden_from_output:
+                    return
+                if not created and getattr(instance, "_eps_prev_hidden", None) is not False:
+                    return                      # not a False -> True flip
+                instance._eps_prev_hidden = None
+                c = getattr(instance, "created_at", None)
+                u = getattr(instance, "updated_at", None)
+                LOGGER.info(
+                    f"EPG & Sports Editor: AUDIT hide flag set on channel {instance.pk} '{instance.name}' "
+                    f"({'created hidden' if created else 'was visible'}; auto_created={instance.auto_created}; "
+                    f"created {c:%Y-%m-%d %H:%M}Z; updated {u:%Y-%m-%d %H:%M}Z) "
+                    f"pid={os.getpid()} thread={threading.current_thread().name} via {_caller_summary()}"
+                    if c and u else
+                    f"EPG & Sports Editor: AUDIT hide flag set on channel {instance.pk} '{instance.name}' "
+                    f"pid={os.getpid()} via {_caller_summary()}"
+                )
+            except Exception:
+                pass
+
+        pre_save.connect(_pre, sender=Channel, weak=False, dispatch_uid=self._hide_audit_uid + "_pre")
+        post_save.connect(_post, sender=Channel, weak=False, dispatch_uid=self._hide_audit_uid + "_post")
+        LOGGER.info("EPG & Sports Editor: hide-flag audit connected")
+
+    def _disconnect_hide_audit_signal(self):
+        from apps.channels.models import Channel
+        from django.db.models.signals import pre_save, post_save
+        pre_save.disconnect(sender=Channel, dispatch_uid=self._hide_audit_uid + "_pre")
+        post_save.disconnect(sender=Channel, dispatch_uid=self._hide_audit_uid + "_post")
+
+    @staticmethod
+    def _log_untracked_hidden(group, hidden_ids, source):
+        """Diagnostic: channels in this group that are hidden but NOT hidden by the
+        past-date feature (user, Dispatcharr UI/API, another tool). Newly seen ones are
+        listed with created/updated times; already-seen ones are only counted, so a
+        steady-state group doesn't repeat itself every pass."""
+        try:
+            from django.core.cache import cache
+            from apps.channels.models import Channel
+            rows = list(
+                Channel.objects.filter(channel_group_id=group.id, auto_created=True, hidden_from_output=True)
+                .exclude(id__in=list(hidden_ids))
+                .values_list("id", "name", "created_at", "updated_at")
+            )
+            if not rows:
+                return
+            seen = set(cache.get(HIDDEN_UNTRACKED_SEEN_CACHE_KEY) or ())
+            new = [r for r in rows if r[0] not in seen]
+            LOGGER.info(
+                f"EPG & Sports Editor: [{source}] '{group.name}' (id {group.id}): {len(rows)} hidden channel(s) "
+                f"NOT hidden by the past-date feature ({len(new)} newly seen)"
+            )
+            for cid, name, created, updated in new[:20]:
+                LOGGER.info(
+                    f"EPG & Sports Editor: [{source}]   hidden, not ours: {cid} '{name}' "
+                    f"(created {created:%Y-%m-%d %H:%M}Z, last saved {updated:%Y-%m-%d %H:%M}Z)"
+                )
+            cache.set(HIDDEN_UNTRACKED_SEEN_CACHE_KEY, seen | {r[0] for r in rows}, timeout=14 * 86400)
+        except Exception as e:
+            LOGGER.debug(f"EPG & Sports Editor: untracked-hidden log skipped: {e}")
+
     def stop(self, context):
         self._disconnect_signal()
         self._disconnect_m3u_signal()
+        self._disconnect_hide_audit_signal()
 
     # ── Rule engine ───────────────────────────────────────────────────────
 
@@ -3395,6 +3523,7 @@ class Plugin:
                     auto_created=True, auto_created_by=m3u_account, channel_group=group,
                 )
                 hidden_before = self._hidden_channel_snapshot(group.id)
+                self._log_untracked_hidden(group, hidden_ids, "auto")
                 for ch in channels:
                     scanned += 1
                     try:
@@ -3457,6 +3586,7 @@ class Plugin:
                 hide_setting_on = bool(settings.get(f"sports_editor_{group.id}_hide_past"))
                 channels = list(Channel.objects.filter(auto_created=True, channel_group=group))
                 hidden_before = self._hidden_channel_snapshot(group.id)
+                self._log_untracked_hidden(group, hidden_ids, "manual")
                 group_matched = group_hidden = 0
                 examples = []
                 for ch in channels:
