@@ -132,6 +132,16 @@ EPG & Sports Editor: [auto]   hidden, not ours: 55878 'Name' (created 2026-11-03
 
 `AUDIT` appears when anything saves a channel with the hide flag turned on, and shows the call path that did it (the Dispatcharr UI or API, another tool, or this plugin). It can't see changes made straight in the database; those show up in the `hidden, not ours` line on the next pass, listed once per channel. A hide or un-hide you do by hand in the Dispatcharr UI is now visible through these lines.
 
+**One summary line per account (v0.5.18).** After every refresh the plugin also logs one line for the M3U account that just refreshed, so you can see what that account's refresh did without reading every group:
+
+```
+EPG & Sports Editor: ACCOUNT SUMMARY 'My Provider' (id 17): auto-created channels=240, created in last 30 min=3, removed during pass=0, renamed=2, matched=13, hidden now=43 (by past-date hide=43, not ours=0), newly hidden this pass=0, newly un-hidden=0
+EPG & Sports Editor: ACCOUNT SUMMARY 'My Provider':   new channel 2101 'Team A @ Team B' created 2026-11-05 08:20:41Z, visible
+EPG & Sports Editor: ACCOUNT SUMMARY 'My Provider':   hidden this pass 2105 'Name' (by past-date hide)
+```
+
+The indented lines list channels created in the last 30 minutes (with their creation time and whether they were created hidden) and channels hidden during the pass, each labelled **by past-date hide** or **NOT by plugin past-date hide**. Only channels auto-created by that account are counted: a refresh of one provider never changes another provider's channels.
+
 **"Past" is calculated in real UTC time, never your own local time zone — a viewer far ahead of US time zones (e.g. New Zealand) will not get channels hidden early.** The date/time text embedded in a channel's name (`SEP 27 8:50 PM ET`) is parsed using the time zone written *in that text* (`ET`/`CT`/`MT`/`PT`/`UK` follow that region's real daylight-saving rules as of v0.5.16; `EDT`/`EST`/`CDT`/`CST`/`MDT`/`MST`/`PDT`/`PST`, `UTC`/`GMT`, `BST`, `NZDT`/`NZST`, `AEDT`/`AEST` are fixed; `CST` means US Central and `PST` US Pacific) and converted to one specific real-world UTC instant. A time with **no** zone written is read as US Eastern. A time whose zone the plugin can't read (`CET`, `JST`, `IST`, `+03`, …) is never used to hide a channel — the channel stays visible rather than being hidden on a guess. That instant — the same instant everywhere on Earth. That instant, plus a small grace buffer, is then compared against the actual current UTC time. Your own clock, calendar date, or **Local Display Timezone** setting never enters this calculation at all — a NZ viewer being ~16–21 hours ahead of US Eastern cannot make a game look "already past" any sooner than it would for a viewer sitting in that same US time zone. It never checks "has the calendar date SEP 27 passed" (which is the thing that *would* break for a viewer far ahead); it checks "has enough real elapsed time passed since that exact moment."
 
 ## Step 4 — Run it

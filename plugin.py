@@ -1107,7 +1107,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.17"
+    version = "0.5.18"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1985,8 +1985,11 @@ class Plugin:
                 LOGGER.debug(f"EPG & Sports Editor: sports editor signal could not read settings: {e}")
                 return
 
+            before_snap = self._account_snapshot(instance)
+            renamed_n = 0
             try:
                 result = self._run_sports_editor_rename(instance, settings)
+                renamed_n = result.get("renamed") or 0
                 if result.get("renamed"):
                     LOGGER.info(
                         f"EPG & Sports Editor: Sports Editor renamed {result['renamed']} channel(s) "
@@ -1995,8 +1998,10 @@ class Plugin:
             except Exception as e:
                 LOGGER.error(f"EPG & Sports Editor: Sports Editor rename failed after '{instance.name}' refresh: {e}")
 
+            matched_n = 0
             try:
                 epg_result = self._run_sports_editor_epg(instance, settings)
+                matched_n = epg_result.get("matched") or 0
                 if epg_result.get("matched"):
                     LOGGER.info(
                         f"EPG & Sports Editor: Sports Editor generated EPG for {epg_result['matched']} "
@@ -2007,6 +2012,7 @@ class Plugin:
 
             # Last, so channels the Sports Editor just gave its own EPG are left alone.
             self._reassign_all_enabled(settings, f"M3U refresh of '{instance.name}'")
+            self._log_account_summary(instance, before_snap, renamed_n, matched_n)
 
         post_save.connect(
             _on_m3u_refresh,
@@ -3291,6 +3297,66 @@ class Plugin:
             hidden_ids.discard(ch.id)
             return True
         return False
+
+    @staticmethod
+    def _account_snapshot(account):
+        """{id: (name, hidden, group_name)} for every channel this M3U account auto-created.
+        Diagnostic only; diffed around a post-refresh pass for the per-account summary."""
+        try:
+            from apps.channels.models import Channel
+            return {
+                i: (n, bool(h), g or "")
+                for i, n, h, g in Channel.objects.filter(auto_created=True, auto_created_by=account)
+                .values_list("id", "name", "hidden_from_output", "channel_group__name")
+            }
+        except Exception:
+            return None
+
+    def _log_account_summary(self, account, before, renamed, matched):
+        """One line per refreshed account saying what its refresh and our pass did, plus
+        the channels created since the last pass with their creation time and hidden flag.
+        Never raises: this is logging only."""
+        try:
+            from apps.channels.models import Channel
+            from datetime import datetime, timedelta, timezone
+            if before is None:
+                return
+            after = self._account_snapshot(account)
+            if after is None:
+                return
+            try:
+                hidden_ids, _ = self._load_hidden_past_state(self._sports_editor_epg_source())
+            except Exception:
+                hidden_ids = set()
+            newly_hidden = [i for i, v in after.items() if v[1] and not before.get(i, (None, False))[1]]
+            newly_shown = [i for i, v in before.items() if v[1] and i in after and not after[i][1]]
+            hidden_now = [i for i, v in after.items() if v[1]]
+            ours = [i for i in hidden_now if i in hidden_ids]
+            recent = datetime.now(timezone.utc) - timedelta(minutes=30)
+            created = list(
+                Channel.objects.filter(auto_created=True, auto_created_by=account, created_at__gte=recent)
+                .values_list("id", "name", "hidden_from_output", "created_at")
+            )
+            gone = [i for i in before if i not in after]
+            LOGGER.info(
+                f"EPG & Sports Editor: ACCOUNT SUMMARY '{account.name}' (id {account.id}): "
+                f"auto-created channels={len(after)}, created in last 30 min={len(created)}, "
+                f"removed during pass={len(gone)}, renamed={renamed}, matched={matched}, "
+                f"hidden now={len(hidden_now)} (by past-date hide={len(ours)}, not ours={len(hidden_now) - len(ours)}), "
+                f"newly hidden this pass={len(newly_hidden)}, newly un-hidden={len(newly_shown)}"
+            )
+            for i, n, h, c in created[:20]:
+                LOGGER.info(
+                    f"EPG & Sports Editor: ACCOUNT SUMMARY '{account.name}':   new channel {i} '{n}' "
+                    f"created {c:%Y-%m-%d %H:%M:%S}Z, {'HIDDEN' if h else 'visible'}"
+                )
+            for i in newly_hidden[:20]:
+                LOGGER.info(
+                    f"EPG & Sports Editor: ACCOUNT SUMMARY '{account.name}':   hidden this pass {i} '{after[i][0]}' "
+                    f"({'by past-date hide' if i in hidden_ids else 'NOT by plugin past-date hide'})"
+                )
+        except Exception as e:
+            LOGGER.debug(f"EPG & Sports Editor: account summary failed: {e}")
 
     @staticmethod
     def _hidden_channel_snapshot(group_id, **extra_filters):
