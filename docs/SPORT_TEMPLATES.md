@@ -47,7 +47,7 @@ In EPG & Sports Editor's Settings tab, scroll to the **SPORTS EDITOR** section. 
 
 In that same group's section, set **Sport Template** to the sport this group carries. Leave it at **(none — regex rules only)** if you just want the plain Rename Rules behavior with no live-schedule matching.
 
-EPG & Sports Editor wires up every league sports-data-platform exposes with real event history (confirmed against SDP's own league registry as of 2026-08-16) — see [Full League List](#full-league-list) below for the complete set of 93 leagues across soccer, baseball, softball, volleyball, basketball, football, tennis, golf, motorsports, MMA, boxing, darts, and more.
+EPG & Sports Editor wires up every league sports-data-platform exposes with real event history (confirmed against SDP's own league registry as of 2026-08-16) — see [Full League List](#full-league-list) below for the complete set of 95 leagues across soccer, baseball, softball, volleyball, basketball, football, tennis, golf, motorsports, MMA, boxing, darts, and more.
 
 > **Two different matching engines run under the hood, per sport.** Most sports are "matchup" sports — the channel name is split into two competitors (`Team A @ Team B`, `Player A vs Player B` for tennis/UFC) and each side is matched independently. Golf (PGA TOUR/LPGA), NASCAR, Formula 1, World Surf League, and Sport Fishing Championship are "single-title" sports — there's no two-sided split; SDP has one descriptive broadcast-feed title per event (e.g. `FedEx St. Jude Championship: McIlroy Group (Third Round)`), and matching is fuzzy title scoring instead. You don't need to configure this — it's automatic per sport — but it explains why single-title templates use `{event_title}` instead of `{away_team_pascal}`/`{home_team_pascal}`, and why that matching is inherently more heuristic (see [Golf & NASCAR matching caveats](#golf--nascar-matching-caveats) below — the same caveats apply to F1/WSL/fishing).
 
@@ -134,6 +134,8 @@ EPG & Sports Editor: [auto]   hidden, not ours: 55878 'Name' (created 2026-11-03
 
 **Old hidden channels that now carry a live game (v0.5.19).** The un-hide rule above only covers channels the plugin hid and recorded. A channel hidden under an old game's name before hides were recorded durably (v0.5.14 and earlier) stays hidden when the provider reuses its slot for a new game. As of v0.5.19, if the group's past-date setting is on and such a hidden channel is matched to a current game, the plugin un-hides it and logs `un-hid channel ... (it was hidden by something other than this plugin's tracking, but it now matches a current game)`. Unmatched channels that are hidden for other reasons are never touched.
 
+**College basketball and other split leagues (v0.5.20).** The feed publishes some sports under more than one league name, so a template now searches every name that can carry its games: NCAAM Basketball searches `ncaam`, `ncaab` and `big-ten-basketball-m`; NCAAW Basketball searches `ncaaw-basketball`, `ncaaw` and `big-ten-basketball-w`; the Big Ten volleyball, soccer and football templates, NCAA soccer and La Liga are paired the same way. When two rows describe one game the complete row (with abbreviations and logos) wins. Channel names like `Basketball (W) X at Y Mon` and `Women's Basketball - X at Y` are cleaned before matching. EuroLeague Basketball and EuroCup Basketball were added as sports.
+
 **One summary line per account (v0.5.18).** After every refresh the plugin also logs one line for the M3U account that just refreshed, so you can see what that account's refresh did without reading every group:
 
 ```
@@ -215,11 +217,11 @@ This was built and tuned against real examples from ESPN+/Kayo/TSN+, plus real A
 
 ## Full League List
 
-Every `league_slug` sports-data-platform exposes with real event history, cross-referenced against SDP's own league registry as of 2026-08-16 — 93 leagues wired into the Sport Template dropdown. "Matchup" sports split the channel name into two competitors; "single-title" sports match one descriptive event title instead (see above). "Person-vs-person" is a matchup sub-type for individual (not team) competitors — tennis, boxing, MMA, darts — that also gets the "Last, First" name-order handling.
+Every `league_slug` sports-data-platform exposes with real event history, cross-referenced against SDP's own league registry as of 2026-08-16 — 95 leagues wired into the Sport Template dropdown. "Matchup" sports split the channel name into two competitors; "single-title" sports match one descriptive event title instead (see above). "Person-vs-person" is a matchup sub-type for individual (not team) competitors — tennis, boxing, MMA, darts — that also gets the "Last, First" name-order handling.
 
 **American football:** NFL, NCAA Football, NCAAF *(the feed publishes college football under two slugs — `ncaaf` is the real ESPN scoreboard, `ncaa-football` is an ESPN+ watch feed that is mostly studio/replay programming plus some real games — so **either template searches both** and prefers the scoreboard game; pick whichever you like)*, NFL FLAG, UFL — all matchup
 
-**Basketball:** NBA, WNBA, NCAAM Basketball, NCAAW Basketball, NZNBL — all matchup
+**Basketball:** NBA, WNBA, NCAAM Basketball, NCAAW Basketball, NZNBL, EuroLeague Basketball, EuroCup Basketball — all matchup
 
 **Baseball:** MLB, NCAA Baseball, ALB, WPBL, JLB, INTERLB, Little League Baseball, NECB, SLBASE — all matchup
 

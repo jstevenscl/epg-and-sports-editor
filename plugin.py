@@ -369,6 +369,8 @@ _SPORT_TEMPLATES = {
     "ncaam":           "NCAAM Basketball",
     "ncaaw-basketball": "NCAAW Basketball",
     "nznbl":           "NZNBL",
+    "euroleague-basketball": "EuroLeague Basketball",
+    "eurocup-basketball":    "EuroCup Basketball",
     # Other team sports
     "wnba":                 "WNBA",
     "afl":                  "AFL",
@@ -445,6 +447,9 @@ _LEAGUE_DURATION_HOURS = {
     # Volleyball
     "ncaa-volleyball": 2.0, "ncaa-womens-volleyball": 2.0, "big-ten-volleyball-w": 2.0,
     "ncaam": 2.5, "ncaaw-basketball": 2.5, "nznbl": 2.5,
+    "euroleague-basketball": 2.25, "eurocup-basketball": 2.25,
+    "ncaab": 2.5, "ncaaw": 2.5, "big-ten-basketball-m": 2.5, "big-ten-basketball-w": 2.5,
+    "big-ten-football": 3.5,
     "wnba": 2.5,
     "afl": 2.5,
     "pll": 2.0, "bhslax": 2.0, "ghslax": 2.0, "wll": 2.0,
@@ -521,11 +526,13 @@ _NOISE_STRIP_SPORTS = set(_SPORT_TEMPLATES)
 # inconsistent (see docs/SPORT_TEMPLATES.md for real examples this was built and
 # tested against). This strips the common shapes seen in practice; new provider
 # formats may need new patterns added here over time.
+# The (?!\d{2}\s*[AaPp][Mm]) guard stops a kickoff time ("... Southern Miss 7:00 PM ET") from being
+# read as one more "tag 7:" and swallowing the whole matchup when the names are short.
 _LEADING_FEED_TAG_RE = re.compile(
     r'^(?:\(?[A-Z]{2,3}\)?\s+)?'                       # optional country code: "US ", "(CA) "
     r'(?:'
-    r'\([A-Za-z0-9+.\s]{2,24}\d{1,3}\)\s*[|:]\s*'      # "(ESPN+ 001) |"
-    r'|[A-Za-z0-9+.\s]{2,24}\d{1,3}\s*[|:]\s*'         # "ESPN+ 04:", "Kayo AU 01:", "TSN+ 01:"
+    r'\([A-Za-z0-9+.\s]{2,24}\d{1,3}\)\s*[|:](?!\d{2}\s*[AaPp][Mm])\s*'      # "(ESPN+ 001) |"
+    r'|[A-Za-z0-9+.\s]{2,24}\d{1,3}\s*[|:](?!\d{2}\s*[AaPp][Mm])\s*'         # "ESPN+ 04:", "Kayo AU 01:", "TSN+ 01:"
     r')+',
     re.IGNORECASE,
 )
@@ -756,17 +763,47 @@ def _parse_embedded_datetime(text, provider_tz=None):
 # feed (381 rows vs 1383, no abbreviations, short school names). Choosing the Women's
 # template used to search only the watch rows, so most channels matched nothing or rendered
 # without logos.
+#
+# College basketball is split three ways, and the Sport Template slugs never matched the feed:
+# the template "ncaaw-basketball" has NO rows in the feed (women's games are under "ncaaw"),
+# and men's regular-season games are under "ncaab" while "ncaam" is mostly exhibitions. Big Ten
+# games also appear under "big-ten-basketball-m/w", sometimes with no other row. The same
+# happens for Big Ten volleyball and soccer, and la-liga is published as both "la-liga" and
+# "laliga". Each template searches every slug that can carry its games (the first entry is the
+# template's own slug, kept so a feed that renames things back still works).
 _SPORT_SLUG_POOL = {
-    "ncaa-football": ("ncaa-football", "ncaaf"),
-    "ncaaf": ("ncaaf", "ncaa-football"),
-    "ncaa-womens-volleyball": ("ncaa-womens-volleyball", "ncaa-volleyball"),
-    "ncaa-volleyball": ("ncaa-volleyball", "ncaa-womens-volleyball"),
+    "ncaa-football": ("ncaa-football", "ncaaf", "big-ten-football"),
+    "ncaaf": ("ncaaf", "ncaa-football", "big-ten-football"),
+    "ncaa-womens-volleyball": ("ncaa-womens-volleyball", "ncaa-volleyball", "big-ten-volleyball-w"),
+    "ncaa-volleyball": ("ncaa-volleyball", "ncaa-womens-volleyball", "big-ten-volleyball-w"),
+    "big-ten-volleyball-w": ("big-ten-volleyball-w", "ncaa-volleyball", "ncaa-womens-volleyball"),
+    "ncaam": ("ncaam", "ncaab", "big-ten-basketball-m"),
+    "ncaaw-basketball": ("ncaaw-basketball", "ncaaw", "big-ten-basketball-w"),
+    "ncaaw-soccer": ("ncaaw-soccer", "big-ten-soccer-w"),
+    "big-ten-soccer-w": ("big-ten-soccer-w", "ncaaw-soccer"),
+    "ncaam-soccer": ("ncaam-soccer", "big-ten-soccer-m"),
+    "big-ten-soccer-m": ("big-ten-soccer-m", "ncaam-soccer"),
+    "la-liga": ("la-liga", "laliga"),
+    "laliga": ("laliga", "la-liga"),
+}
+
+# A feed row's own league slug -> the Sport Template that renders it. Used when the
+# MATCHED event's slug is not itself a template (an "Any Sport" network match landing on a
+# pooled slug): without this the match was thrown away as "no template for this league".
+_EVENT_SLUG_TEMPLATE = {
+    "ncaab": "ncaam", "big-ten-basketball-m": "ncaam",
+    "ncaaw": "ncaaw-basketball", "big-ten-basketball-w": "ncaaw-basketball",
+    "big-ten-football": "ncaaf",
 }
 
 # SDP league_slug -> the slug game-thumbs actually serves. game-thumbs has no
 # "ncaa-volleyball" (HTTP 400 for every team); the same games live under
-# "ncaa-womens-volleyball".
-_GAMETHUMBS_SLUG_ALIASES = {"ncaa-volleyball": "ncaa-womens-volleyball"}
+# "ncaa-womens-volleyball". Likewise it has no big-ten-basketball-* (HTTP 400).
+_GAMETHUMBS_SLUG_ALIASES = {
+    "ncaa-volleyball": "ncaa-womens-volleyball",
+    "big-ten-basketball-m": "ncaab",
+    "big-ten-basketball-w": "ncaaw",
+}
 
 # ── Network Channels ────────────────────────────────────────────────────────────
 # A "Network Channel" is a channel that names a broadcast network instead of two
@@ -955,6 +992,9 @@ _MATCHUP_LEAD_RES = [
     # existing "Big 12: TCU" colon rule can't catch these when the separator is a dash.
     re.compile(r"^\s*(?:[A-Za-z0-9+&]{1,12}\s+)?(?:College\s+)?Football\s*[-–:|]\s*", re.IGNORECASE),
     re.compile(r"^\s*American\s+Football\s+NCAA\s+Football\s+", re.IGNORECASE),    # "American Football NCAA Football Stanford"
+    # "Basketball (W) Cleveland St.", "Basketball (M) Bucknell", "Women's Basketball - Jessup",
+    # "Men's Basketball: UTSA" -- a sport tag with a (W)/(M) marker or a dash/colon/pipe.
+    re.compile(r"^\s*(?:Women'?s\s+|Men'?s\s+)?Basketball\s*(?:\([WM]\)\s*[-–:|]?\s*|[-–:|]\s*)", re.IGNORECASE),
 ]
 _MATCHUP_RANK_RE = re.compile(r"^\s*(?:#\d{1,2}|\(\d{1,2}\)|No\.\s*\d{1,2})\s+", re.IGNORECASE)
 _MATCHUP_TRAIL_RES = [
@@ -973,6 +1013,7 @@ _MATCHUP_TRAIL_RES = [
     re.compile(rf"\s+{_MONTHS_RE_FRAG}[a-z]*\.?\s+\d{{1,2}}\b.*$", re.IGNORECASE),  # " SEP 25 - 8:00 PM ET / 1:00 AM UK"
     re.compile(r"\s*\|\s*[A-Za-z]+,\s.*$"),                                         # "| Saturday, 08 March 2025 20:00"
     re.compile(r"\s*@\s*$"),                                                        # dangling "@"
+    re.compile(r"\s+(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\.?\s*$", re.IGNORECASE),  # "Penn State Mon" (day-of-week tag)
     re.compile(r"\s+\d{1,2}(?::\d{2})?\s*[AaPp][Mm](?:\s*(?:ET|CT|MT|PT))?\s*$"),    # "UC Davis 10pm" "Trinity (TX) 8pm"
 ]
 
@@ -1107,7 +1148,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.19"
+    version = "0.5.20"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -3454,7 +3495,10 @@ class Plugin:
         # fixed one, and even a league-scoped group's network match could technically
         # span the pooled slugs in _SPORT_SLUG_POOL) — use the MATCHED event's own
         # league for templates/duration/label from here on, not the group's setting.
-        template_slug = event.get("league_slug") if sport_slug == _ANY_SPORT_VALUE else sport_slug
+        template_slug = sport_slug
+        if sport_slug == _ANY_SPORT_VALUE:
+            template_slug = event.get("league_slug")
+            template_slug = _EVENT_SLUG_TEMPLATE.get(template_slug, template_slug)
         if template_slug not in _SPORT_TEMPLATES:
             # Matched to a league SDP added after this plugin's _SPORT_TEMPLATES list
             # (or one with no scoreboard slug at all) — nothing to render it with.
