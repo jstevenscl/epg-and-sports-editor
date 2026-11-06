@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-06T01:00:00Z",
+  "generated_at": "2026-11-06T20:25:50Z",
   "manifest": {
     "registry_url": "https://github.com/jstevenscl/epg-and-sports-editor",
     "registry_name": "jstevenscl/epg-and-sports-editor",
@@ -8,16 +8,16 @@
       {
         "slug": "epg-and-sports-editor",
         "name": "EPG & Sports Editor",
-        "description": "Create transformed virtual copies of EPG sources using per-source, per-field regex and find/replace rules. Channels are auto-reassigned and kept in sync after every refresh. Generates fill EPG schedules for channels with no EPG data, and a Sports Editor with live-schedule matching (93 leagues) for auto-synced sports channels.",
+        "description": "Create transformed virtual copies of EPG sources using per-source, per-field regex and find/replace rules. Channels are auto-reassigned and kept in sync after every refresh. Generates fill EPG schedules for channels with no EPG data, and a Sports Editor with live-schedule matching (95 leagues) for auto-synced sports channels.",
         "manifest_url": "manifest.json",
         "author": "jstevenscl",
         "license": "MIT",
-        "last_updated": "2026-11-06T01:00:00Z",
-        "latest_version": "0.5.19",
-        "latest_md5": "2a0f3731fdca56b60d979644ae505a95",
-        "latest_sha256": "7f28926bf42caa2cb60fe806c5f98a617293cd554d3bde3a95529f319cb6410a",
-        "latest_url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.5.19/epg-and-sports-editor-v0.5.19.zip",
-        "latest_size": 186421,
+        "last_updated": "2026-11-06T20:25:50Z",
+        "latest_version": "0.5.20",
+        "latest_md5": "4851957d80c7f97911a5352a5a43232f",
+        "latest_sha256": "8967990f19582b453d6ddee4dc054e7af9012218aef58374043a66ca3e73feef",
+        "latest_url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.5.20/epg-and-sports-editor-v0.5.20.zip",
+        "latest_size": 187298,
         "help_url": "https://github.com/jstevenscl/epg-and-sports-editor#documentation"
       }
     ]
