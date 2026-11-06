@@ -1107,7 +1107,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.18"
+    version = "0.5.19"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -3228,9 +3228,10 @@ class Plugin:
                               provider_tz=None):
         """"Hide auto-created channels with a past date in their name" — opt-in per
         group. `hidden_ids` is the persistent set of Channel ids THIS feature has
-        hidden (see HIDDEN_PAST_CHANNELS_PROP_KEY); mutated in place. Only ever
-        un-hides a channel that's in that set — a channel a user hid manually for an
-        unrelated reason is never touched, in either direction. Returns True if
+        hidden (see HIDDEN_PAST_CHANNELS_PROP_KEY); mutated in place. Never hides a
+        channel that is already hidden, and un-hides a channel outside that set only in
+        one case: it was just matched to a current game while the group's setting is on
+        (v0.5.19, orphaned hides from before durable tracking). Returns True if
         `hidden_ids` changed, so the caller knows to persist it."""
         from datetime import datetime, timezone, timedelta
         from apps.channels.models import Channel
@@ -3244,6 +3245,18 @@ class Plugin:
                     LOGGER.info(f"EPG & Sports Editor: un-hid channel {ch.id} '{ch.name}' (past-date hide: now matches a current game)")
                 hidden_ids.discard(ch.id)
                 return True
+            if hide_setting_on and ch.hidden_from_output:
+                # Hidden, but not by us as far as our records go: typically a channel hidden
+                # under an old game's name before hides were tracked durably (<= v0.5.14),
+                # whose provider slot was later reused for a live game (Dispatcharr's auto
+                # sync renames the existing row and keeps the hidden flag). It has just been
+                # matched to a current game, so showing it is the intent of this feature.
+                Channel.objects.filter(pk=ch.pk).update(hidden_from_output=False)
+                ch.hidden_from_output = False
+                LOGGER.info(
+                    f"EPG & Sports Editor: un-hid channel {ch.id} '{ch.name}' (it was hidden by something "
+                    f"other than this plugin's tracking, but it now matches a current game)"
+                )
             return False
 
         if not hide_setting_on:

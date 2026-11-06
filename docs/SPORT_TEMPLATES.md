@@ -132,6 +132,8 @@ EPG & Sports Editor: [auto]   hidden, not ours: 55878 'Name' (created 2026-11-03
 
 `AUDIT` appears when anything saves a channel with the hide flag turned on, and shows the call path that did it (the Dispatcharr UI or API, another tool, or this plugin). It can't see changes made straight in the database; those show up in the `hidden, not ours` line on the next pass, listed once per channel. A hide or un-hide you do by hand in the Dispatcharr UI is now visible through these lines.
 
+**Old hidden channels that now carry a live game (v0.5.19).** The un-hide rule above only covers channels the plugin hid and recorded. A channel hidden under an old game's name before hides were recorded durably (v0.5.14 and earlier) stays hidden when the provider reuses its slot for a new game. As of v0.5.19, if the group's past-date setting is on and such a hidden channel is matched to a current game, the plugin un-hides it and logs `un-hid channel ... (it was hidden by something other than this plugin's tracking, but it now matches a current game)`. Unmatched channels that are hidden for other reasons are never touched.
+
 **One summary line per account (v0.5.18).** After every refresh the plugin also logs one line for the M3U account that just refreshed, so you can see what that account's refresh did without reading every group:
 
 ```
