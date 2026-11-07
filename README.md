@@ -519,6 +519,9 @@ Fixed in v0.5.20. The schedule feed publishes college basketball under several n
 
 **New: EuroLeague Basketball and EuroCup Basketball.** Both are in the Sport Template list (v0.5.20).
 
+**A channel group that mixes EuroLeague and EuroCup games only matches one of them.**
+Fixed in v0.5.21. Some providers put both competitions in one group (for example "Live | EuroLeague TV"). The EuroLeague Basketball and EuroCup Basketball templates now search each other's games, so either one can be chosen for such a group. The channel is named and illustrated with the template you chose.
+
 **Which of my providers hid or created a channel, and when?**
 As of v0.5.18 every refresh logs an `ACCOUNT SUMMARY` line for the account that refreshed (channels it auto-created, how many are new, renamed, matched, hidden now, newly hidden or un-hidden), followed by a line per new channel with its creation time and hidden flag. Search the log for `ACCOUNT SUMMARY`. A refresh only changes channels created by its own account; see the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#hiding-auto-created-channels-with-a-past-date-in-their-name-v0502)**.
 

@@ -783,6 +783,10 @@ _SPORT_SLUG_POOL = {
     "big-ten-soccer-w": ("big-ten-soccer-w", "ncaaw-soccer"),
     "ncaam-soccer": ("ncaam-soccer", "big-ten-soccer-m"),
     "big-ten-soccer-m": ("big-ten-soccer-m", "ncaam-soccer"),
+    # Providers (e.g. a "EuroLeague TV" group) mix both European competitions in one channel
+    # group, so either template must find games from both.
+    "euroleague-basketball": ("euroleague-basketball", "eurocup-basketball"),
+    "eurocup-basketball": ("eurocup-basketball", "euroleague-basketball"),
     "la-liga": ("la-liga", "laliga"),
     "laliga": ("laliga", "la-liga"),
 }
@@ -1148,7 +1152,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.20"
+    version = "0.5.21"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
