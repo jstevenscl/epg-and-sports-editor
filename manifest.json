@@ -12,12 +12,12 @@
         "manifest_url": "manifest.json",
         "author": "jstevenscl",
         "license": "MIT",
-        "last_updated": "2026-11-16T01:58:02Z",
-        "latest_version": "0.5.22",
-        "latest_md5": "f36629a0a3c67f51ed022fb67d0a55ba",
-        "latest_sha256": "2022b18c2fcbaf5650e71f0ec64e4786fa58a9f4b7caa985e4c11323f182bc7a",
-        "latest_url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.5.22/epg-and-sports-editor-v0.5.22.zip",
-        "latest_size": 187766,
+        "last_updated": "2026-11-16T02:55:49Z",
+        "latest_version": "0.5.23",
+        "latest_md5": "d49e3d29b71f98e20e1f7d8e95d95411",
+        "latest_sha256": "0a011b137a0ec6370fec7308c4e435df6cd4743edd797ba6f8b0f04e5d883364",
+        "latest_url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.5.23/epg-and-sports-editor-v0.5.23.zip",
+        "latest_size": 188348,
         "help_url": "https://github.com/jstevenscl/epg-and-sports-editor#documentation"
       }
     ]
