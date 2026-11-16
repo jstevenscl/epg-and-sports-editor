@@ -1153,7 +1153,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.22"
+    version = "0.5.23"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -2670,7 +2670,8 @@ class Plugin:
                 variants.add(f"{parts[1]} {parts[0]}")
         return max(cls._team_match_score(v, *candidates) for v in variants)
 
-    def _find_sdp_event(self, away_text, home_text, league_slug, events, score_fn=None):
+    def _find_sdp_event(self, away_text, home_text, league_slug, events, score_fn=None,
+                        back_hours=20, forward_days=10):
         """Best-match a channel's parsed away/home team text against cached SDP
         events for the given league, within a sensible time window. Returns the
         event dict, or None if nothing scores well enough to be confident."""
@@ -2681,8 +2682,8 @@ class Plugin:
         # Past bound is generous — a game that aired earlier today should still
         # resolve so its Postgame template/recap can show. Duration-aware trimming
         # happens later when EPG blocks are built from the matched event's own start time.
-        window_start = now - timedelta(hours=20)
-        window_end = now + timedelta(days=10)
+        window_start = now - timedelta(hours=back_hours)
+        window_end = now + timedelta(days=forward_days)
 
         best_event, best_rank = None, None
         slug_pool = _SPORT_SLUG_POOL.get(league_slug, (league_slug,))
@@ -3271,7 +3272,7 @@ class Plugin:
 
     @staticmethod
     def _apply_past_date_hide(ch, matched, hide_setting_on, hidden_ids, grace_hours=PAST_CHANNEL_GRACE_HOURS,
-                              provider_tz=None):
+                              provider_tz=None, stale_when=None):
         """"Hide auto-created channels with a past date in their name" — opt-in per
         group. `hidden_ids` is the persistent set of Channel ids THIS feature has
         hidden (see HIDDEN_PAST_CHANNELS_PROP_KEY); mutated in place. Never hides a
@@ -3318,7 +3319,7 @@ class Plugin:
 
         # Exact kickoff this plugin stored when it matched the channel (zone-proof) beats
         # parsing a time out of free text; the name parse is only for raw provider names.
-        when = _generated_game_start(ch) or _parse_embedded_datetime(ch.name, provider_tz)
+        when = _generated_game_start(ch) or _parse_embedded_datetime(ch.name, provider_tz) or stale_when
         now = datetime.now(timezone.utc)
         is_past = when is not None and when < now - timedelta(hours=grace_hours)
         if is_past and _has_current_generated_epg(ch, now):
@@ -3341,8 +3342,8 @@ class Plugin:
             Channel.objects.filter(pk=ch.pk).update(hidden_from_output=True)
             hidden_ids.add(ch.id)
             LOGGER.info(
-                f"EPG & Sports Editor: hid channel {ch.id} '{ch.name}' (past-date hide: name's "
-                f"start {when:%Y-%m-%d %H:%M}Z is more than {grace_hours:g}h ago, no current game match)"
+                f"EPG & Sports Editor: hid channel {ch.id} '{ch.name}' (past-date hide: game start "
+                f"{when:%Y-%m-%d %H:%M}Z (from the name, or the past schedule game it matches) is more than {grace_hours:g}h ago, no current game match)"
             )
             return True
 
@@ -3447,6 +3448,32 @@ class Plugin:
                 f"EPG & Sports Editor: [{source}]   hidden during pass: {i} '{n}' "
                 f"({'by past-date hide' if (hide_setting_on and i in hidden_ids) else 'NOT by plugin past-date hide'})"
             )
+
+    STALE_LOOKBACK_DAYS = 14
+
+    def _stale_game_start(self, ch, sport_slug, events):
+        """UTC start of the PAST game a channel's team names point at, or None. For channels
+        that matched no current game and whose name carries no date (a provider's
+        "NFL 03: Texans @ Browns 1:00 PM"): once the game has aged out of the live matching
+        window nothing else says the channel is stale, so the past-date hide could never
+        fire. The schedule feed keeps about two weeks of finished games, so look back there
+        for the same two teams. Only called for unmatched channels, so no current or upcoming
+        game exists for these teams — a past hit means the channel is showing an old game."""
+        from datetime import datetime, timezone
+        if sport_slug == _ANY_SPORT_VALUE or _SPORT_MATCH_MODE.get(sport_slug, "matchup") != "matchup":
+            return None
+        try:
+            matchup = self._extract_matchup_teams(ch.name, strip_noise=sport_slug in _NOISE_STRIP_SPORTS)
+            if not matchup:
+                return None
+            score_fn = self._person_name_score if sport_slug in _PERSON_VS_PERSON_SPORTS else None
+            event = self._find_sdp_event(matchup[0], matchup[1], sport_slug, events, score_fn=score_fn,
+                                         back_hours=self.STALE_LOOKBACK_DAYS * 24, forward_days=0)
+            if not event:
+                return None
+            return datetime.fromisoformat(event["start_time_utc"].replace("Z", "+00:00")).astimezone(timezone.utc)
+        except Exception:
+            return None
 
     def _process_sports_editor_channel(self, ch, sport_slug, events, settings, epg_source):
         """Try to match `ch` (already renamed by regex rules, if any) to a live SDP
@@ -3658,7 +3685,9 @@ class Plugin:
                         is_matched = self._process_sports_editor_channel(ch, sport, events, settings, epg_source)
                         if is_matched:
                             matched += 1
-                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours, provider_tz):
+                        stale_when = None if is_matched or not hide_setting_on else self._stale_game_start(ch, sport, events)
+                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours, provider_tz,
+                                                      stale_when=stale_when):
                             hidden_ids_changed = True
                     except Exception as e:
                         LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
@@ -3726,7 +3755,9 @@ class Plugin:
                             group_matched += 1
                             if len(examples) < 5:
                                 examples.append(f"  '{old_name}' -> '{ch.name}'")
-                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours, provider_tz):
+                        stale_when = None if is_matched or not hide_setting_on else self._stale_game_start(ch, sport, events)
+                        if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours, provider_tz,
+                                                      stale_when=stale_when):
                             hidden_ids_changed = True
                             if not was_hidden_by_us and ch.id in hidden_ids:
                                 group_hidden += 1
