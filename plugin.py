@@ -9,6 +9,7 @@ a Sports Editor that matches auto-synced channels against live schedule data.
 """
 
 import collections
+import contextlib
 import logging
 import os
 import re
@@ -1152,7 +1153,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.21"
+    version = "0.5.22"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -3924,6 +3925,40 @@ class Plugin:
         how many it actually parsed (a source mid-refresh makes it defer instead)."""
         from apps.epg.tasks import parse_programs_for_tvg_id
 
+        with Plugin._sd_treat_as_mapped(epg_ids):
+            return Plugin._reparse_source_entries_inner(epg_ids, parse_programs_for_tvg_id)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _sd_treat_as_mapped(epg_ids):
+        """Schedules Direct only downloads guide data for stations whose EPG entry is
+        mapped to a channel (apps.epg.sd_tasks calls epg_ids_mapped_to_channels). Once
+        our virtual EPG owns the channels, the SD entries are unmapped, so the re-parse
+        is skipped ("No channels mapped to this SD source") and the guide goes stale.
+        While re-parsing, report our SD entries as mapped too. XMLTV entries unaffected."""
+        try:
+            from apps.epg.models import EPGData
+            import apps.channels.managers as managers
+            sd_ids = set(EPGData.objects.filter(
+                id__in=list(epg_ids), epg_source__source_type="schedules_direct"
+            ).values_list("id", flat=True))
+            original = managers.epg_ids_mapped_to_channels
+        except Exception:
+            sd_ids, original, managers = set(), None, None
+        if not sd_ids:
+            yield
+            return
+
+        def patched(*args, **kwargs):
+            return set(original(*args, **kwargs)) | sd_ids
+        managers.epg_ids_mapped_to_channels = patched
+        try:
+            yield
+        finally:
+            managers.epg_ids_mapped_to_channels = original
+
+    @staticmethod
+    def _reparse_source_entries_inner(epg_ids, parse_programs_for_tvg_id):
         done = 0
         for eid in epg_ids:
             try:
