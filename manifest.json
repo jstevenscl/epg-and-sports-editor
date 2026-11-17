@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-07T01:23:42Z",
+  "generated_at": "2026-11-17T19:59:42Z",
   "manifest": {
     "registry_url": "https://github.com/jstevenscl/epg-and-sports-editor",
     "registry_name": "jstevenscl/epg-and-sports-editor",
@@ -9,16 +9,17 @@
         "slug": "epg-and-sports-editor",
         "name": "EPG & Sports Editor",
         "description": "Create transformed virtual copies of EPG sources using per-source, per-field regex and find/replace rules. Channels are auto-reassigned and kept in sync after every refresh. Generates fill EPG schedules for channels with no EPG data, and a Sports Editor with live-schedule matching (95 leagues) for auto-synced sports channels.",
-        "manifest_url": "manifest.json",
+        "manifest_url": "zips/epg-and-sports-editor/manifest.json",
         "author": "jstevenscl",
         "license": "MIT",
-        "last_updated": "2026-11-16T02:55:49Z",
-        "latest_version": "0.5.23",
-        "latest_md5": "d49e3d29b71f98e20e1f7d8e95d95411",
-        "latest_sha256": "0a011b137a0ec6370fec7308c4e435df6cd4743edd797ba6f8b0f04e5d883364",
-        "latest_url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.5.23/epg-and-sports-editor-v0.5.23.zip",
-        "latest_size": 188348,
-        "help_url": "https://github.com/jstevenscl/epg-and-sports-editor#documentation"
+        "last_updated": "2026-11-17T19:59:42Z",
+        "latest_version": "0.6.0",
+        "latest_md5": "e7a927efac7c92c615e2eeec3b4cdd38",
+        "latest_sha256": "bd58f26c8fa923a1b88929df78203e51ae2efb15440b1658a329ed1f442cec09",
+        "latest_url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.6.0/epg-and-sports-editor-v0.6.0.zip",
+        "latest_size": 190712,
+        "help_url": "https://github.com/jstevenscl/epg-and-sports-editor#documentation",
+        "min_dispatcharr_version": "0.34.0"
       }
     ]
   }
