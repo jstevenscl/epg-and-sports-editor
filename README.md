@@ -8,11 +8,33 @@ A [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) plugin that creates 
 
 ---
 
+## Which version do I need?
+
+| Your Dispatcharr | Use EPG & Sports Editor | Documentation |
+|---|---|---|
+| **0.34.0 or newer** | **0.6.x** (current) | This page and the [Sport Templates Guide](docs/SPORT_TEMPLATES.md) |
+| 0.33.x or older | 0.5.x (legacy — bug fixes only) | [Legacy documentation](https://github.com/jstevenscl/epg-and-sports-editor/tree/legacy-0.5) |
+
+Dispatcharr 0.34 introduced the plugin format 0.6 is built on, so 0.6 cannot be installed on 0.33 or older. On an older Dispatcharr, open EPG & Sports Editor in **Find Plugins** and choose a 0.5.x version from the version picker.
+
+**Upgrading from 0.5.x on Dispatcharr 0.34+?** Update from the plugin page. Your settings, virtual EPGs and sports-editor groups are kept, and the Include / Exclude / Fill group fields convert to the new pickers automatically. There is no Restart Dispatcharr step any more.
+
+**What's new in 0.6.0**
+- **A tidier settings page.** Every EPG source and every Sports Editor channel group is its own collapsible section, so a long list no longer turns into one endless scroll.
+- **Pickers instead of typing.** *Include Channel Groups*, *Exclude Channel Groups* and *Fill Groups* are searchable multi-selects fed by your real channel groups. A group name typed in a different case than the provider uses (`Bein Sports` vs `BEIN SPORTS`) is still matched.
+
+![Typing in a group picker finds BEIN SPORTS and beIN SPORTS regardless of case](docs/screenshots/v06_group_picker.png)
+
+- **Slow actions no longer time out.** Setup, Apply Now and Teardown run in Dispatcharr's background queue and report progress, instead of racing the page's 55-second limit.
+- **No restart step.** Dispatcharr loads new plugin code right away, so the *Restart Dispatcharr* action is gone. A new **Refresh Lists** action reloads the plugin so the pickers pick up a new EPG source or channel group.
+
+---
+
 ## Documentation
 
 | I want to… | Go to |
 |---|---|
-| **Install the plugin** | [Installation](#installation) |
+| **Install the plugin** | [Which version do I need?](#which-version-do-i-need) · [Installation](#installation) |
 | **Clean up titles / sub-titles in my EPG** | [Quick Start — EPG Transformation](#quick-start--epg-transformation), then [Rule Format](#rule-format) |
 | **Fill channels that have no EPG** | [Quick Start — Fill EPG](#quick-start--fill-epg) |
 | **Rename and schedule sports channels** | [Quick Start — Sports Editor](#quick-start--sports-editor) |
@@ -78,7 +100,7 @@ Some providers name a channel after the broadcast network instead of two teams �
 
 ---
 
-![EPG & Sports Editor installed in Dispatcharr](docs/screenshots/01_plugin_installed.png)
+![EPG & Sports Editor in Dispatcharr's My Plugins list](docs/screenshots/v06_my_plugins.png)
 
 ## Installation
 
@@ -90,10 +112,14 @@ Some providers name a channel after the broadcast network instead of two teams �
    https://jstevenscl.github.io/epg-and-sports-editor/manifest.json
    ```
 3. Click **Add Repo**, then find **EPG & Sports Editor** in the list and install it
+4. Enable the plugin. Dispatcharr loads new plugin code right away, so no restart is needed
+5. Open the plugin page and configure your settings, then click **Save**
 
 ### Manual Install
 
-Copy `plugin.py` and `plugin.json` into your Dispatcharr plugins directory (any folder name works as of v0.4.06 — e.g. `epg-and-sports-editor` or `epg_and_sports_editor`) and reload plugins.
+Copy `plugin.py`, `plugin.json` and `logo.png` into your Dispatcharr plugins directory (any folder name works — e.g. `epg-and-sports-editor`) and click **Reload All Plugins** on the My Plugins page.
+
+> Requires **Dispatcharr 0.34.0 or newer**. On 0.33 or older, use the 0.5.x line — see [Which version do I need?](#which-version-do-i-need).
 
 ---
 
@@ -103,7 +129,7 @@ Copy `plugin.py` and `plugin.json` into your Dispatcharr plugins directory (any 
 
 Before writing any rules, use **Sample Data** to see what tags and patterns actually exist in your sources.
 
-1. Open EPG & Sports Editor → **Actions tab**
+1. Open EPG & Sports Editor from **My Plugins**. The **Actions** list is on the left and the **Settings** sections are on the right
 2. Click **Sample Data**
 
 The output groups programs by category (episode codes, broadcast flags, quality tags, unicode flags, etc.) and shows real before/after examples.
@@ -126,25 +152,24 @@ Common presets:
 
 ### Step 3 — Enable a source and add rules
 
-1. Open EPG & Sports Editor → **Settings tab**
-2. Find the EPG source you want to clean
+1. On the plugin page, find the EPG source you want to clean in the **Settings** column (each source is a collapsible section — click its name to open it)
 3. Toggle **Enable transformation** ON
 4. Paste your rules into **Title Rules** (and/or Sub-Title / Description Rules)
 
-![Settings tab — source toggle and rule fields](docs/screenshots/03_settings_tab.png)
+![An EPG source section opened — toggle and rule fields](docs/screenshots/v06_source_section.png)
 
 ### Step 4 — Preview (optional but recommended)
 
-Click **Preview** in the Actions tab. Shows exactly which programs would change and the before/after values — no data is modified.
+Click **Preview** in the **Actions** list. Shows exactly which programs would change and the before/after values — no data is modified.
 
 ### Step 5 — Run Setup
 
-Click **Setup** in the Actions tab. This:
+Click **Setup** in the **Actions** list. This:
 - Creates a virtual EPG source (`EPG & Sports Editor: [Your Source Name]`)
 - Transforms all programs and writes them to the virtual source
 - Reassigns your channels to the virtual source automatically
 
-![Actions tab](docs/screenshots/02_actions_tab.png)
+![The plugin page: tasks and actions on the left, collapsible settings sections on the right](docs/screenshots/v06_plugin_page.png)
 
 From this point on, **every EPG refresh automatically re-runs the transformation**. You never have to touch Setup again unless you add a new source.
 
@@ -156,13 +181,13 @@ Fill EPG generates a repeating placeholder schedule for channels that have no EP
 
 ### Step 1 — Configure Fill Groups
 
-In **Settings → Fill EPG**, enter the names of the channel groups you want to fill (comma-separated). Example: `SiriusXM, Radio`.
+In the **EPG Fill** section, open **Fill Groups** and pick the channel groups you want to fill (type to search; pick as many as you like).
 
 Also set **Block Duration** (how long each placeholder program block is) and **Days Ahead** (how many days of schedule to generate).
 
 ### Step 2 — Scan to see what will be filled
 
-Click **Scan** in the Actions tab. This shows all channels with no EPG data, grouped by channel group, and marks which groups are targeted by Fill EPG.
+Click **Scan** in the **Actions** list. This shows all channels with no EPG data, grouped by channel group, and marks which groups are targeted by Fill EPG.
 
 ### Step 3 — Fill
 
@@ -196,8 +221,8 @@ Want real channel names, logos, and a Pregame/Live/Postgame EPG instead of just 
 
 | Button | What it does |
 |---|---|
-| **Setup** | First time you enable a source, or after adding a new source. Creates the virtual EPG and reassigns channels. |
-| **Apply Now** | After changing rules — re-runs the transform immediately without waiting for the next EPG refresh. If it takes longer than about 35 seconds it keeps going in the background (so the Dispatcharr page never shows a 504) and the per-source counts go to the log (v0.5.14+). |
+| **Setup** | First time you enable a source, or after adding a new source. Creates the virtual EPG and reassigns channels. Runs in the background with a progress bar, so a big install can't time out. |
+| **Apply Now** | After changing rules — re-runs the transform immediately without waiting for the next EPG refresh. Runs in Dispatcharr's background queue with a progress bar, so a large transform can't time out; the per-source counts are in the task's history. (On the 0.5.x line it handed off to a background thread after about 35 seconds.) |
 | **Preview** | Dry-run your current rules. Shows before/after for affected programs. No changes made. |
 | **Sample Data** | Discover what tags/patterns exist in your sources. Run this before writing rules. |
 | **Test Rule** | Test a single rule against live data from any source and field. Uses the Rule Tester settings. |
@@ -207,11 +232,11 @@ Want real channel names, logos, and a Pregame/Live/Postgame EPG instead of just 
 | **Run Sport Templates Now** | Match each Sport-Template-enabled group's auto-created channels against the live schedule right now — renames matches, assigns logos, and generates Pregame/Live/Postgame EPG data. |
 | **Release Stuck Hidden Channels** | One-time cleanup (v0.5.15+) for channels the past-date hide feature hid in an older version and then lost track of — matched, renamed, with EPG, yet still hidden, even with the hide setting off. Un-hides hidden auto-created channels in your Sports Editor groups that carry this plugin's generated EPG. Not needed after that: from v0.5.15 the plugin remembers what it hid. See the [FAQ](#faq). |
 | **Show Status** | Shows which sources are enabled, program counts, Fill EPG status, and configured rules. |
-| **Teardown** | Removes all virtual EPG sources (including Fill EPG) and reassigns channels back to their originals. |
+| **Teardown** | Removes all virtual EPG sources (including Fill EPG) and reassigns channels back to their originals. Runs in the background with progress. |
 | **Clear Stuck EPG Refreshes** | Use when an EPG source never refreshes and the Dispatcharr log repeats `Deferring refresh … per-channel program parses in progress`. Clears Dispatcharr's stuck parse counter, but only when no parse is actually running. Also done automatically after every refresh and Apply Now (v0.5.14+). See the [FAQ](#faq). |
-| **Restart Dispatcharr** | Reloads Dispatcharr's backend process so it picks up a plugin update — run this after every EPG & Sports Editor install/update. Not a full container restart; the page goes offline for about 15 seconds. |
+| **Refresh Lists** | Reloads this plugin so the pickers and sections in Settings pick up anything added since it last loaded — a new EPG source, channel group or sport template. Needed because Dispatcharr builds the settings page when the plugin loads. |
 
-![Lower half of the Actions tab, including Release Stuck Hidden Channels and Clear Stuck EPG Refreshes](docs/screenshots/02b_actions_maintenance.png)
+![The maintenance actions: Release Stuck Hidden Channels, Show Status, Teardown, Clear Stuck EPG Refreshes and Refresh Lists](docs/screenshots/v06_actions_maintenance.png)
 
 ---
 
@@ -329,14 +354,14 @@ Each EPG source in Dispatcharr gets its own section. Per-source settings:
 | **Force Category (Series Mode)** | Adds an XMLTV `<category>` tag to every program on this source's virtual copy. Setting this to `Series` tells Plex to treat repeating programs that share a title as episodes of a show instead of duplicate movies, so DVR can record more than one. Comma-separated for multiple categories. Leave blank to disable. |
 | **Synthesize Episode Numbers From Air Date** | Adds a unique `<episode-num system="xmltv_ns">` tag per program, derived from its air date (year + day-of-year), so Plex sees each airing as a distinct episode instead of collapsing same-titled programs into one recordable movie. Pair with Force Category above. |
 | **Auto-Reassign Channels on Setup** | Toggle channel reassignment on/off for this source |
-| **Include Channel Groups** | Comma-separated group names — only these groups are reassigned |
-| **Exclude Channel Groups** | Comma-separated group names — these groups are skipped |
+| **Include Channel Groups** | Picker — only the selected groups are reassigned. Leave empty to include every group. |
+| **Exclude Channel Groups** | Picker — the selected groups are skipped. Applied after Include. |
 
 ### Fill EPG
 
 | Setting | Description |
 |---|---|
-| **Fill Groups** | Comma-separated channel group names. Channels in these groups with no EPG get a generated schedule. |
+| **Fill Groups** | Picker. Channels in the selected groups with no EPG get a generated schedule. Leave empty to turn Fill EPG off. |
 | **Skip Channels** | One channel name per line. These channels are excluded from Fill EPG even if in a Fill Group. |
 | **Block Duration** | Duration of each generated program block (1–24 hours). |
 | **Days Ahead** | How many days of schedule to generate ahead (7, 14, or 30). |
@@ -380,10 +405,10 @@ Global Sports Editor settings (one each, shared by every sport):
 
 The Rule Tester lets you test a single rule against live data from any source without modifying anything.
 
-1. Go to **Settings tab** → scroll to **Rule Tester**
+1. In the **Settings** column, open the **Rule Tester** section
 2. Select the source and field (Title, Sub-Title, or Description)
 3. Enter a pattern and optional replacement
-4. Click **Test Rule** in the Actions tab
+4. Click **Test Rule** in the **Actions** list
 
 You can also paste specific text into **Test Text** to test against that instead of pulling live data.
 
@@ -419,13 +444,13 @@ No — click **Apply Now**. Setup is only needed when adding a new source for th
 Click **Teardown**. This deletes all virtual EPG sources (including Fill EPG) and reassigns your channels back to their original sources.
 
 **Clicking Dispatcharr's own refresh icon (⟳) on an "EPG & Sports Editor: ..." row in M3U & EPG Manager gives an error about the source URL.**
-Expected — EPG & Sports Editor's virtual/generated EPG sources (transform virtuals, Fill EPG, Sports Editor) intentionally have no URL, since EPG & Sports Editor writes their program data directly instead of Dispatcharr fetching it. Dispatcharr's native per-source refresh only knows how to fetch a URL, so it always fails on these with something like "Failed to download EPG data, cannot parse programs." This only flips that source's Status column to "Error" — it never touches your actual EPG data. Always use the plugin's own Actions tab buttons (**Apply Now**, **Fill**, **Run Sport Templates Now**) to refresh EPG & Sports Editor-managed data; running any of them restores the Status column to "Success."
+Expected — EPG & Sports Editor's virtual/generated EPG sources (transform virtuals, Fill EPG, Sports Editor) intentionally have no URL, since EPG & Sports Editor writes their program data directly instead of Dispatcharr fetching it. Dispatcharr's native per-source refresh only knows how to fetch a URL, so it always fails on these with something like "Failed to download EPG data, cannot parse programs." This only flips that source's Status column to "Error" — it never touches your actual EPG data. Always use the plugin's own Actions buttons (**Apply Now**, **Fill**, **Run Sport Templates Now**) to refresh EPG & Sports Editor-managed data; running any of them restores the Status column to "Success."
 
 **The unicode broadcast flags (`ᴺᵉʷ`, `ᴸᶦᵛᵉ`) show zero matches in Sample Data.**
 These are provider-specific — not all EPG sources include them. Use Sample Data with each enabled source individually to find which one has them. They're typically found in Gracenote-sourced or aggregator feeds.
 
 **I updated Dispatcharr and now plugin action buttons don't show any output.**
-This is a known display-only regression, present since Dispatcharr v0.25.0 and still occurring as of v0.29.0. When you click an action button (Status, Fill, Run Sport Templates, etc.) the action runs correctly on the backend and all data is written — the result text just doesn't render in the modal UI. To confirm an action completed, click **Show Status** which will show current program counts and source state. All functionality continues to work normally. No change to EPG & Sports Editor is needed.
+**Dispatcharr 0.33 and older only** (the 0.5.x line) — this is a known display-only regression, present since Dispatcharr v0.25.0 and still occurring as of v0.29.0. Dispatcharr 0.34's plugin page shows action results normally. When you click an action button (Status, Fill, Run Sport Templates, etc.) the action runs correctly on the backend and all data is written — the result text just doesn't render in the modal UI. To confirm an action completed, click **Show Status** which will show current program counts and source state. All functionality continues to work normally. No change to EPG & Sports Editor is needed.
 
 **My renamed channels / Sports Editor changes revert every time the M3U or EPG refreshes.**
 Fixed in v0.4.02. Versions 0.4.00–0.4.01 had a bug where the plugin's internal settings lookup used the wrong key format, so its post-refresh hooks silently did nothing after every M3U/EPG refresh (manual **Run Sport Templates Now**/**Apply Now** still worked, since those don't depend on the broken lookup). Update to 0.4.02 or later — no settings changes needed.
@@ -443,7 +468,7 @@ Fixed in v0.4.06. The post-refresh hooks looked up the plugin's saved settings u
 Fixed in v0.4.06. The schedule feed carries a second broadcast-only row per game whose away/home order is usually reversed; when a channel name matched both rows equally, either could win. Matching now prefers the complete main row, then the row whose away/home order matches the channel name, then the game closest to now (so a series matches the upcoming game instead of one that already finished).
 
 **A brand-new channel group doesn't appear in the Sports Editor settings until it already has channels.**
-Improved in v0.4.06: groups with Auto Channel Sync enabled are now listed even before their first channels exist. Dispatcharr builds the settings form when the plugin loads, so use the plugins **Restart Dispatcharr**/reload after enabling Auto Channel Sync on a new group for it to show up.
+Improved in v0.4.06: groups with Auto Channel Sync enabled are now listed even before their first channels exist. Dispatcharr builds the settings form when the plugin loads, so click **Refresh Lists** after enabling Auto Channel Sync on a new group for it to show up.
 
 **A channel gets its game name and logo, then goes back to the provider's original name after the game.**
 That's by design: once a game's window has passed (estimated end + the **Postgame Window** setting), the game counts as finished, and the next M3U refresh restores the provider's name and stops rewriting the channel. Before v0.4.07 that window was a fixed 1 hour; it is now a setting (default 3 hours, up to 12) under Sports Editor → **Postgame Window**. A late-night check (e.g. 11:54 PM for an 8:00 PM game that ended 10:45 PM) used to look like "no match".
@@ -497,7 +522,7 @@ Yes, as of v0.5.02 — turn on **Hide auto-created channels with a past date in 
 No. The comparison is done entirely in real UTC time. For a channel the plugin has matched, it uses the exact kickoff it stored (always UTC, v0.5.16+). For a raw provider name it uses the time zone written in the name (`ET`/`CT`/`MT`/`PT`, plus `EDT`/`EST`/`CDT`/`CST`/`MDT`/`MST`/`PDT`/`PST`, `UTC`/`GMT`, `BST`/`UK`, `NZDT`/`NZST`, `AEDT`/`AEST`); a time with no zone is read as US Eastern. A time with a zone the plugin can't read (`CET`, `JST`, `+03`, …) is never used to hide a channel. It never uses your local clock or the plugin's **Local Display Timezone** setting. `SEP 27 8:50 PM ET` becomes one specific real-world instant, the same instant everywhere on Earth, and hiding only happens once that much real time has actually elapsed (plus a small grace buffer) — never based on "has the calendar date passed" for whoever's looking at it. See the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#hiding-auto-created-channels-with-a-past-date-in-their-name-v0502)** for the full explanation.
 
 **Channels with real games (renamed, with EPG and a logo) are still hidden, or hidden channels never come back.**
-Fixed in v0.5.15. The plugin only un-hides channels it knows it hid, and it used to keep that list in Dispatcharr's cache (Redis), which is emptied whenever Dispatcharr restarts or updates. Channels hidden before that restart stayed hidden for good — even after they matched a game, and even after you turned the hide setting off. The list now lives in the database. After updating, restart Dispatcharr and press **Release Stuck Hidden Channels** once on the Actions tab to un-hide channels already stuck; then turn the hide setting back on if you want it. If a channel still hides when it shouldn't, send the `hide-state` log lines (see the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#hiding-auto-created-channels-with-a-past-date-in-their-name-v0502)**).
+Fixed in v0.5.15. The plugin only un-hides channels it knows it hid, and it used to keep that list in Dispatcharr's cache (Redis), which is emptied whenever Dispatcharr restarts or updates. Channels hidden before that restart stayed hidden for good — even after they matched a game, and even after you turned the hide setting off. The list now lives in the database. After updating, press **Release Stuck Hidden Channels** once in the Actions list to un-hide channels already stuck; then turn the hide setting back on if you want it. If a channel still hides when it shouldn't, send the `hide-state` log lines (see the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#hiding-auto-created-channels-with-a-past-date-in-their-name-v0502)**).
 
 **Channels with an "ET" time in the name were hidden an hour too early (or a game got hidden before the 4-hour grace was up).**
 Fixed in v0.5.16. The plugin used to treat every day from March through November as daylight time, but US daylight time ends on the first Sunday of November (and starts on the second Sunday of March). In those weeks `ET` was read an hour off, so channels hid early (US Eastern is UTC−5 on Nov 2, 2026, not UTC−4). The plugin now uses the real daylight-saving rules for `ET`/`CT`/`MT`/`PT`/`UK`.
@@ -506,10 +531,10 @@ Fixed in v0.5.16. The plugin used to treat every day from March through November
 Fixed in v0.5.16. The plugin writes your local time into the channel name (`... at 8:00 PM CET`) and used to read that text back later to decide whether the game was past — but it could only read a handful of zone names (anything else, like `CET`, `JST`, `IST` or `+03`, was treated as US Eastern, hours off). It now records the exact UTC kickoff when it matches a channel and uses that instead of re-reading its own text. For a provider's raw name with a zone it can't read, it leaves the channel visible rather than guessing. A provider time with no zone label is read as US Eastern. Channels matched before updating pick up the exact kickoff the next time they match; until then the safe fallback above applies.
 
 **NCAA Women's Volleyball channels aren't renamed, have no logo, or show the wrong team logos.**
-Fixed in v0.5.15. The schedule feed publishes college volleyball under two names: `ncaa-volleyball` is the full scoreboard, and `ncaa-womens-volleyball` is only a thin ESPN+ list with no team abbreviations. Choosing the Women's template searched only the thin list, so most games never matched and the rest got logos guessed from short school names (Middle Tennessee came out as Tennessee). Either volleyball template now searches both and prefers the full row. Also fixed: a date written after the home team (`Siena @ Iona on Saturday Oct 31 at 10:00 AM NZDT`) is now ignored, where it used to stop short school names such as Iona or NJIT from matching. Restart Dispatcharr after updating, then run **Run Sport Templates Now**.
+Fixed in v0.5.15. The schedule feed publishes college volleyball under two names: `ncaa-volleyball` is the full scoreboard, and `ncaa-womens-volleyball` is only a thin ESPN+ list with no team abbreviations. Choosing the Women's template searched only the thin list, so most games never matched and the rest got logos guessed from short school names (Middle Tennessee came out as Tennessee). Either volleyball template now searches both and prefers the full row. Also fixed: a date written after the home team (`Siena @ Iona on Saturday Oct 31 at 10:00 AM NZDT`) is now ignored, where it used to stop short school names such as Iona or NJIT from matching. After updating, run **Run Sport Templates Now**.
 
 **A channel was hidden but there is nothing about it in the log.**
-Fixed in v0.5.17. The refreshes Dispatcharr runs on its own schedule (for example "refresh every 6 hours") execute in Dispatcharr's background worker, and that worker starts with its log level at WARNING. The plugin's normal INFO lines (`hid channel`, `un-hid channel`, `hide-state`, `M3U refresh signal fired`) were therefore dropped for every pass a scheduled refresh triggered, even though the pass ran and renamed, matched and hid channels. Passes you started by hand (**Run Sport Templates Now**) were logged, which made the gap hard to see. The plugin now keeps its own lines at INFO in the worker (it still respects a `DISPATCHARR_LOG_LEVEL` of `warning` or `error` if you set one). v0.5.17 also adds two diagnostic lines: `AUDIT hide flag set on channel ...` when anything saves a channel as hidden (with the process and where the call came from), and `hidden, not ours: ...` for hidden channels the past-date feature did not hide, with when each was created and last saved. Update, restart Dispatcharr, and the next scheduled refresh will be fully logged.
+Fixed in v0.5.17. The refreshes Dispatcharr runs on its own schedule (for example "refresh every 6 hours") execute in Dispatcharr's background worker, and that worker starts with its log level at WARNING. The plugin's normal INFO lines (`hid channel`, `un-hid channel`, `hide-state`, `M3U refresh signal fired`) were therefore dropped for every pass a scheduled refresh triggered, even though the pass ran and renamed, matched and hid channels. Passes you started by hand (**Run Sport Templates Now**) were logged, which made the gap hard to see. The plugin now keeps its own lines at INFO in the worker (it still respects a `DISPATCHARR_LOG_LEVEL` of `warning` or `error` if you set one). v0.5.17 also adds two diagnostic lines: `AUDIT hide flag set on channel ...` when anything saves a channel as hidden (with the process and where the call came from), and `hidden, not ours: ...` for hidden channels the past-date feature did not hide, with when each was created and last saved. Update, and the next scheduled refresh will be fully logged.
 
 **Channels with today's game are hidden even though nothing in the log says the plugin hid them.**
 Fixed in v0.5.19. Many providers reuse a slot (for example "ESPN+ 100") for a new game each day, and Dispatcharr's Auto Channel Sync reuses the existing channel, renaming it. If that channel had been hidden while the slot held an old, past game, it stayed hidden under the new name. The plugin only un-hid channels it had recorded as its own, and hides made before v0.5.15 were never recorded durably. As of v0.5.19, when a channel in a group with "Hide auto-created channels with a past date" turned on is hidden, not recorded as the plugin's, and has just been matched to a current game, the plugin un-hides it and logs `un-hid channel ... (it was hidden by something other than this plugin's tracking, but it now matches a current game)`. A channel you hid by hand is left alone unless it later matches a current game. Channels in groups where the setting is off are never touched.
@@ -541,7 +566,7 @@ Fixed in v0.5.08. Once Setup moves your channels onto the virtual EPG, Dispatcha
 Fixed in v0.5.08: a leading conference/league tag plus the word *Football* and a dash (`B1G Football - `, `Football - `, `SEC Football: `, `American Football NCAA Football `) is now recognized as decoration, and a time glued to the end of a team name (`UC Davis 10pm`) is stripped. As always, if you have a channel shape that still doesn't match, send the exact raw channel name.
 
 **An EPG source never refreshes and the Dispatcharr log keeps repeating "Deferring refresh … per-channel program parses in progress".**
-Handled in v0.5.14. Dispatcharr holds back a source's refresh while a counter in Redis says per-channel program parses are running for it. If a parse is cut off partway — a worker or the container restarting, a process being killed — the counter never counts back down, and that source's refresh waits forever; before this, only restarting the Dispatcharr container cleared it. The plugin now checks for this and clears the counter by itself after every EPG refresh and every **Apply Now**, or you can press **Clear Stuck EPG Refreshes** on the Actions tab. It only clears a counter when no parse is actually running, so it never interrupts real work. A killed parse's lock can take up to about 5 minutes to expire — if the button says a lock is still held, wait a few minutes and press it again. If it keeps coming back, please [open an issue](https://github.com/jstevenscl/epg-and-sports-editor/issues) with the Dispatcharr log lines from just before the first "Deferring refresh" line.
+Handled in v0.5.14. Dispatcharr holds back a source's refresh while a counter in Redis says per-channel program parses are running for it. If a parse is cut off partway — a worker or the container restarting, a process being killed — the counter never counts back down, and that source's refresh waits forever; before this, only restarting the Dispatcharr container cleared it. The plugin now checks for this and clears the counter by itself after every EPG refresh and every **Apply Now**, or you can press **Clear Stuck EPG Refreshes** in the Actions list. It only clears a counter when no parse is actually running, so it never interrupts real work. A killed parse's lock can take up to about 5 minutes to expire — if the button says a lock is still held, wait a few minutes and press it again. If it keeps coming back, please [open an issue](https://github.com/jstevenscl/epg-and-sports-editor/issues) with the Dispatcharr log lines from just before the first "Deferring refresh" line.
 
 **Apply Now shows a 504 / gateway timeout error in the Dispatcharr UI.**
 Fixed in v0.5.14. The reverse proxy in front of Dispatcharr gives up on a request after about 50 seconds, but the plugin kept working anyway, so the UI showed an error for a run that actually succeeded. Apply Now now waits up to 35 seconds and answers with the normal per-source counts; if the run is bigger than that it tells you it is finishing in the background (no need to click again) and writes the counts to the Dispatcharr log. Re-parsing a source's own stale programs also now happens in the background instead of inside the request.

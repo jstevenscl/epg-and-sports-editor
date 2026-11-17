@@ -39,7 +39,7 @@ Dispatcharr's **Auto Channel Sync** creates channels automatically from an M3U s
 
 ## Step 1 — Enable the Sports Editor for your channel group
 
-In EPG & Sports Editor's Settings tab, scroll to the **SPORTS EDITOR** section. Find your channel group (e.g. "NFL Game Pass Test") and toggle **Enable Sports Editor for this group** on.
+On the plugin page, open the **SPORTS EDITOR** section in the Settings column. Find your channel group (e.g. "NFL Game Pass Test") — each group is its own collapsible section — and toggle **Enable Sports Editor for this group** on.
 
 ![Sports Editor section for one channel group — enable toggle, Sport Template dropdown, and Rename Rules](screenshots/07_sports_editor_group_section.png)
 
@@ -113,7 +113,7 @@ Some providers reuse a fixed numbered channel slot for each day's game, and it b
 - **Never touches a channel you hid manually for any other reason.** This feature only ever un-hides a channel it hid itself — it keeps a list of which channels those are, and a channel that's already hidden for some other reason is left alone entirely, in both directions. As of v0.5.15 that list is stored in the database (on the Sports Editor EPG source), so it survives a Dispatcharr restart or update; before that it lived in Dispatcharr's cache, was wiped by every restart, and channels hidden earlier then stayed hidden for good.
 - Off by default, per group.
 
-**Channels stuck hidden after an update or restart? (v0.5.15+)** In v0.5.14 and earlier, a Dispatcharr restart or update made the plugin forget which channels it had hidden. Those channels then never came back — not when they matched a game, were renamed and given EPG and a logo, and not when you switched the setting off — which looks like channels being hidden for no reason. Update, restart Dispatcharr, and press **Release Stuck Hidden Channels** on the Actions tab once. It un-hides every hidden auto-created channel in your Sports Editor groups that has this plugin's generated EPG. One caveat: a channel you hid by hand that also has that EPG is un-hidden too, so re-hide it if that happens. After that you don't need the button again — the plugin now remembers what it hid. Turn the hide setting back on afterwards if you want it.
+**Channels stuck hidden after an update or restart? (v0.5.15+)** In v0.5.14 and earlier, a Dispatcharr restart or update made the plugin forget which channels it had hidden. Those channels then never came back — not when they matched a game, were renamed and given EPG and a logo, and not when you switched the setting off — which looks like channels being hidden for no reason. Update and press **Release Stuck Hidden Channels** in the Actions list once. It un-hides every hidden auto-created channel in your Sports Editor groups that has this plugin's generated EPG. One caveat: a channel you hid by hand that also has that EPG is un-hidden too, so re-hide it if that happens. After that you don't need the button again — the plugin now remembers what it hid. Turn the hide setting back on afterwards if you want it.
 
 **Channels hidden and you didn't turn this on? (v0.5.10+)** This feature can only hide a channel in a group where its toggle is on, so if a group's toggle is off and channels are still hidden, something else hid them (a manual hide, another plugin, or Dispatcharr itself). To tell, check the Dispatcharr log (filter for `EPG & Sports Editor`). Every Sports Editor pass — the automatic one after an M3U refresh and **Run Sport Templates Now** — logs one line per group, for example:
 
@@ -122,7 +122,7 @@ Some providers reuse a fixed numbered channel slot for each day's game, and it b
 [manual]   hidden during pass: 53633 'NHL 04 - ...' (NOT by plugin past-date hide)
 ```
 
-`hidden before` / `after` count the group's channels hidden from output at the start and end of the pass. Each channel hidden during the pass is listed and labelled **by past-date hide** or **NOT by plugin past-date hide**. When this feature hides or un-hides a channel it also logs that channel by id and name. For a clean test, un-hide the channels in the affected groups first, then run a refresh; any channel that shows up as hidden afterward was hidden during that pass. **Scheduled refreshes now log too (v0.5.17).** Before v0.5.17 these lines were missing for any pass triggered by a *scheduled* M3U refresh, because Dispatcharr's background worker runs at log level WARNING and the plugin's INFO lines were dropped; only passes you started by hand were logged. Update and restart Dispatcharr to get them. v0.5.17 also adds two lines to help find out who hid a channel:
+`hidden before` / `after` count the group's channels hidden from output at the start and end of the pass. Each channel hidden during the pass is listed and labelled **by past-date hide** or **NOT by plugin past-date hide**. When this feature hides or un-hides a channel it also logs that channel by id and name. For a clean test, un-hide the channels in the affected groups first, then run a refresh; any channel that shows up as hidden afterward was hidden during that pass. **Scheduled refreshes now log too (v0.5.17).** Before v0.5.17 these lines were missing for any pass triggered by a *scheduled* M3U refresh, because Dispatcharr's background worker runs at log level WARNING and the plugin's INFO lines were dropped; only passes you started by hand were logged. Update to get them. v0.5.17 also adds two lines to help find out who hid a channel:
 
 ```
 EPG & Sports Editor: AUDIT hide flag set on channel 55878 'Name' (was visible; auto_created=True; created 2026-11-03 09:16Z; updated 2026-11-03 09:16Z) pid=460 thread=MainThread via views.py:1566 update <- ...
@@ -151,7 +151,7 @@ The indented lines list channels created in the last 30 minutes (with their crea
 ## Step 4 — Run it
 
 - **Automatically**: nothing to do — it runs right after every successful M3U refresh, immediately after Rename Rules.
-- **Manually / right now**: go to the Actions tab and click **Run Sport Templates Now**. This is the fastest way to test a template change without waiting for the next refresh.
+- **Manually / right now**: click **Run Sport Templates Now** in the Actions list. This is the fastest way to test a template change without waiting for the next refresh.
 
 The result message shows per-group match counts and a few example renames:
 
@@ -162,9 +162,9 @@ NFL Game Pass Test (NFL): scanned 3, matched 3
   ...
 ```
 
-> **Note:** On some Dispatcharr versions (a known display-only regression, present since v0.25.0), the result text above doesn't render in the Actions modal even though the action ran and wrote all its data correctly. If clicking **Run Sport Templates** doesn't visibly show anything, click **Show Status** instead to confirm — or just check your TV Guide/Channels list directly.
+> **Note:** On Dispatcharr 0.33 and older (a known display-only regression, present since v0.25.0; not seen on 0.34), the result text above doesn't render in the Actions modal even though the action ran and wrote all its data correctly. If clicking **Run Sport Templates** doesn't visibly show anything, click **Show Status** instead to confirm — or just check your TV Guide/Channels list directly.
 
-> **Don't use Dispatcharr's own per-source refresh icon (⟳) in M3U & EPG Manager on the "EPG & Sports Editor: Sports Editor" or "EPG & Sports Editor: Fill" rows.** These sources deliberately have no URL — EPG & Sports Editor writes their program data directly instead of Dispatcharr fetching it — so Dispatcharr's native refresh will always fail with something like "Failed to download EPG data, cannot parse programs." **This is expected and harmless**: it only flips the source's cosmetic Status column to "Error," it never touches or deletes your actual EPG data. Use **Run Sport Templates Now** (or **Fill**, or **Apply Now**) in the plugin's own Actions tab instead — those are the only actions that should ever be used to refresh EPG & Sports Editor-managed data, and running any of them again immediately restores the Status column to "Success."
+> **Don't use Dispatcharr's own per-source refresh icon (⟳) in M3U & EPG Manager on the "EPG & Sports Editor: Sports Editor" or "EPG & Sports Editor: Fill" rows.** These sources deliberately have no URL — EPG & Sports Editor writes their program data directly instead of Dispatcharr fetching it — so Dispatcharr's native refresh will always fail with something like "Failed to download EPG data, cannot parse programs." **This is expected and harmless**: it only flips the source's cosmetic Status column to "Error," it never touches or deletes your actual EPG data. Use **Run Sport Templates Now** (or **Fill**, or **Apply Now**) in the plugin's own Actions list instead — those are the only actions that should ever be used to refresh EPG & Sports Editor-managed data, and running any of them again immediately restores the Status column to "Success."
 
 ## Step 5 — Check your TV Guide
 
@@ -444,7 +444,7 @@ Confirm your Game Thumbs Base URL is reachable from wherever your player renders
 Click **Run Sport Templates Now** — it always regenerates all three blocks fresh for every currently-matched channel using your latest saved templates.
 
 **Clicking the refresh icon (⟳) next to "EPG & Sports Editor: Sports Editor" in M3U & EPG Manager gives an error about the source URL.**
-Expected — see the note in [Step 4](#step-4--run-it) above. That row intentionally has no URL. Use **Run Sport Templates Now** in the plugin's Actions tab instead; your real EPG data was never affected.
+Expected — see the note in [Step 4](#step-4--run-it) above. That row intentionally has no URL. Use **Run Sport Templates Now** in the plugin's Actions list instead; your real EPG data was never affected.
 
 **I get a "failed to update plugin settings: 400" error when running Sport Templates actions.**
 Fixed in v0.4.03 — see the README FAQ. The action itself still completed and your data was written; update the plugin to clear the spurious error.
