@@ -10,6 +10,7 @@ a Sports Editor that matches auto-synced channels against live schedule data.
 
 import collections
 import contextlib
+import json
 import logging
 import os
 import re
@@ -72,6 +73,127 @@ def _find_plugin_config(enabled_only=False):
         if k in rows:
             return rows[k]
     return None
+
+
+# ── Manifest-version-aware settings UI (Dispatcharr 0.34.0+) ─────────────────────
+# `section` / `multiselect` field types only exist from manifest_version 1. On a v0
+# manifest the host DROPS them (with a log warning), so the plugin must pick its field
+# style from its OWN plugin.json: v1+ on a host that knows the types -> modern fields;
+# anything else -> the legacy flat text fields. One codebase serves both; flipping
+# plugin.json "manifest_version" is the whole switch.
+def _own_manifest_version():
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin.json")
+        with open(path, encoding="utf-8") as fh:
+            return int(json.load(fh).get("manifest_version", 0))
+    except Exception:
+        return 0
+
+
+def _modern_ui():
+    """True when this install should render sections + multiselects."""
+    if _own_manifest_version() < 1:
+        return False
+    try:
+        from apps.plugins.field_versions import FIELD_TYPE_VERSIONS
+        return "multiselect" in FIELD_TYPE_VERSIONS and "section" in FIELD_TYPE_VERSIONS
+    except Exception:
+        return False
+
+
+# ── Channel-group name settings (include / exclude / fill) ───────────────────────
+# Stored as a LIST by the multiselect control, or as a legacy comma-separated string
+# (older versions, and the text field on a v0 manifest). Every reader goes through
+# _as_name_list / _resolve_group_names so both shapes work.
+_GROUP_NAME_KEYS = ("include_groups", "exclude_groups", "fill_groups")
+
+
+def _as_name_list(raw):
+    """Group names from a multiselect value (list) or a legacy comma-separated string."""
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        return [str(n).strip() for n in raw if str(n).strip()]
+    return [n.strip() for n in str(raw).split(",") if n.strip()]
+
+
+def _resolve_group_names(raw):
+    """Exact ChannelGroup names for saved group names. EXACT match first; only a name
+    with no exact match falls back to a case-insensitive match (which may legitimately
+    return several groups). IPTV providers ship groups that differ only by case
+    ("BEIN SPORTS" and "Bein Sports") — a hand-typed legacy "Bein Sports" used to match
+    nothing when the provider spelled it "BEIN SPORTS", while a pure __iexact lookup
+    raises on duplicates. One query, never raises."""
+    names = _as_name_list(raw)
+    if not names:
+        return []
+    from apps.channels.models import ChannelGroup
+    existing = list(ChannelGroup.objects.values_list("name", flat=True))
+    # Saved names arrive stripped (and the UI strips option values), so compare on the
+    # stripped form: providers do ship "24/7 CHANNELS" and "24/7 CHANNELS " as two groups.
+    by_strip = {}
+    by_fold = {}
+    for n in existing:
+        by_strip.setdefault(n.strip(), []).append(n)
+        by_fold.setdefault(n.strip().casefold(), []).append(n)
+    resolved = []
+    for name in names:
+        hits = by_strip.get(name) or by_fold.get(name.casefold(), [])
+        for h in hits:
+            if h not in resolved:
+                resolved.append(h)
+    return resolved
+
+
+def _migrate_group_name_settings():
+    """One-time, idempotent: legacy CSV strings in the group-name settings become lists
+    so the multiselect controls show the user's existing selections. Modern UI only."""
+    try:
+        cfg = _find_plugin_config()
+        if not cfg or not cfg.settings:
+            return
+        settings = dict(cfg.settings)
+        changed = False
+        for key in _GROUP_NAME_KEYS:
+            if isinstance(settings.get(key), str):
+                settings[key] = _as_name_list(settings[key])
+                changed = True
+        if changed:
+            cfg.settings = settings
+            cfg.save(update_fields=["settings"])
+            LOGGER.info("EPG & Sports Editor: migrated group-name settings from comma-separated text to multiselect lists")
+    except Exception as e:
+        LOGGER.warning(f"EPG & Sports Editor: group-name settings migration skipped: {e}")
+
+
+# Per-entity sections start collapsed (one per EPG source / channel group / sport
+# template — hundreds of fields otherwise); the top-level ones start open.
+_COLLAPSED_SECTION_RE = re.compile(r"^_section_(src_\d+|sports_editor_\d+|sport_template_.+)$")
+
+
+def _apply_sections(fields):
+    """Turn this plugin's `_section_*` info headers into collapsible `section` fields and
+    attach the fields that follow each header to it. Display-only: setting ids and saved
+    values are untouched. The header's description stays visible as the section's first
+    (info) member."""
+    out, current = [], None
+    for f in fields:
+        fid = f.get("id", "")
+        if f.get("type") == "info" and fid.startswith("_section"):
+            current = "sec" + fid                       # e.g. sec_section_src_5
+            marker = {"id": current, "type": "section",
+                      "label": (f.get("label") or fid).strip(" ═─-") or fid}
+            if _COLLAPSED_SECTION_RE.match(fid):
+                marker["collapsed"] = True
+            out.append(marker)
+            if f.get("description"):
+                out.append({"id": fid, "type": "info", "label": "", "description": f["description"],
+                            "section": current})
+            continue
+        if current and f.get("type") != "section" and "section" not in f:
+            f = {**f, "section": current}
+        out.append(f)
+    return out
 
 
 def _link_channel_epg(channel, epg_entry):
@@ -1153,7 +1275,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.5.23"
+    version = "0.6.0"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1168,6 +1290,8 @@ class Plugin:
         self._hide_audit_uid = "epg_and_sports_editor_hide_audit"
         _ensure_log_visible()
         self._migrate_from_legacy_key()
+        if _modern_ui():
+            _migrate_group_name_settings()
         self.fields = self._build_fields()
         LOGGER.info("EPG & Sports Editor: initialized")
         self._connect_signal()
@@ -1889,7 +2013,7 @@ class Plugin:
             },
         ]
 
-        return (
+        all_fields = (
             fields
             + self._channel_scope_fields
             + self._fill_fields
@@ -1897,6 +2021,52 @@ class Plugin:
             + self._build_sport_template_fields()
             + tester_fields
         )
+        if not _modern_ui():
+            return all_fields
+        return _apply_sections(self._with_group_multiselects(all_fields))
+
+    def get_fields(self, context=None):
+        """Dispatcharr 0.34+ discovery hook. The field list is a snapshot taken at plugin
+        load/reload (EPG sources, channel groups, sport templates) — the 'Refresh Lists'
+        action asks Dispatcharr to reload the plugin so new sources/groups appear."""
+        return self.fields
+
+    # Multiselect replacements for the three comma-separated group-name text fields.
+    _GROUP_FIELD_HELP = {
+        "include_groups": "Only channels in the selected groups are reassigned. Leave empty to include all groups.",
+        "exclude_groups": "Channels in the selected groups are skipped. Applied after Include Groups.",
+        "fill_groups": "Channels in the selected groups with no EPG will get a generated schedule. Leave empty to disable.",
+    }
+
+    def _with_group_multiselects(self, fields):
+        """Swap include/exclude/fill group text fields for multiselects fed by the live
+        channel groups. Dispatcharr validates a save against THESE options, so a saved
+        name whose group was renamed/deleted (or was hand-typed in the old text field) is
+        kept as a flagged '(not found)' option rather than blocking every future save."""
+        try:
+            from apps.channels.models import ChannelGroup
+            # de-duplicated: the UI's select refuses duplicate option values outright
+            live = list(dict.fromkeys(n.strip() for n in ChannelGroup.objects.order_by("name").values_list("name", flat=True)))
+        except Exception as e:
+            LOGGER.debug(f"EPG & Sports Editor: could not load channel groups for multiselects: {e}")
+            live = []
+        try:
+            cfg = _find_plugin_config()
+            saved = (cfg.settings if cfg else None) or {}
+        except Exception:
+            saved = {}
+        out = []
+        for f in fields:
+            if f.get("id") in _GROUP_NAME_KEYS:
+                known = set(live)
+                extra = [n for n in _as_name_list(saved.get(f["id"])) if n not in known]
+                opts = [{"value": n, "label": n} for n in live] + [
+                    {"value": n, "label": f"{n} (not found)"} for n in dict.fromkeys(extra)]
+                f = {k: v for k, v in f.items() if k not in ("placeholder", "default")}
+                f.update(type="multiselect", options=opts, default=[],
+                         help_text=self._GROUP_FIELD_HELP[f["id"]])
+            out.append(f)
+        return out
 
     # ── Signal management ─────────────────────────────────────────────────
     # One signal watches all EPGSources. On each successful refresh it reads
@@ -1949,7 +2119,7 @@ class Plugin:
                 "in the plugin's settings — no virtual EPG copy made"
             )
 
-        if settings.get("fill_groups", "").strip():
+        if _as_name_list(settings.get("fill_groups")):
             LOGGER.info(f"EPG & Sports Editor: running Fill EPG after '{instance.name}' refresh")
             try:
                 self._action_fill_epg(settings, LOGGER)
@@ -4174,12 +4344,14 @@ class Plugin:
     def _channel_qs(self, source, settings):
         from apps.channels.models import Channel
         qs = Channel.objects.filter(epg_data__epg_source=source)
-        include = [g.strip() for g in (settings.get("include_groups") or "").split(",") if g.strip()]
-        exclude = [g.strip() for g in (settings.get("exclude_groups") or "").split(",") if g.strip()]
+        include = _as_name_list(settings.get("include_groups"))
+        exclude = _as_name_list(settings.get("exclude_groups"))
         if include:
-            qs = qs.filter(channel_group__name__in=include)
+            # A non-empty Include list that resolves to no real group must still match
+            # nothing (not everything) — so test the RAW list, filter on the resolved one.
+            qs = qs.filter(channel_group__name__in=_resolve_group_names(include))
         if exclude:
-            qs = qs.exclude(channel_group__name__in=exclude)
+            qs = qs.exclude(channel_group__name__in=_resolve_group_names(exclude))
         return qs
 
     def _channel_tvg_id(self, channel_name):
@@ -4192,9 +4364,9 @@ class Plugin:
         from apps.channels.models import Channel
         from apps.epg.models import EPGSource
 
-        fill_group_names = [g.strip() for g in (settings.get('fill_groups') or '').split(',') if g.strip()]
-        if not fill_group_names:
+        if not _as_name_list(settings.get('fill_groups')):
             return []
+        fill_group_names = _resolve_group_names(settings.get('fill_groups'))
 
         # Include channels with no EPG, already on our fill, or on any (other) dummy
         # source (covers Dispatcharr's built-in dummy fill so we can replace it). Our
@@ -4378,20 +4550,24 @@ class Plugin:
     def run(self, action, params, context):
         settings = context.get("settings", {})
         logger = context.get("logger", LOGGER)
+        # Dispatcharr 0.34+: actions flagged "async" in plugin.json run on the task queue
+        # (no HTTP timeout) and can report progress. Older hosts supply neither.
+        progress = context.get("report_progress") or (lambda *a, **k: None)
+        background = bool(((context.get("actions") or {}).get(action) or {}).get("async"))
         handlers = {
-            "setup":                  self._action_setup,
-            "apply_now":              self._action_apply_now,
+            "setup":                  lambda st, lg: self._action_setup(st, lg, progress),
+            "apply_now":              lambda st, lg: self._action_apply_now(st, lg, progress, background),
             "sample":                 self._action_sample,
             "preview":                self._action_preview,
             "status":                 self._action_status,
-            "teardown":               self._action_teardown,
+            "teardown":               lambda st, lg: self._action_teardown(st, lg, progress),
             "test_rule":              self._action_test_rule,
             "scan":                   self._action_scan,
             "fill_epg":               self._action_fill_epg,
             "sports_editor_rename_now": self._action_sports_editor_rename_now,
             "sports_editor_epg_now":  self._action_sports_editor_epg_now,
             "release_orphaned_hidden": self._action_release_orphaned_hidden,
-            "restart_dispatcharr":    self._action_restart_dispatcharr,
+            "refresh_settings":       self._action_refresh_settings,
             "clear_parse_counters":   self._action_clear_parse_counters,
             "on_epg_refresh":         lambda st, lg: self._action_on_epg_refresh(st, lg, params),
             "on_m3u_refresh":         lambda st, lg: self._action_on_m3u_refresh(st, lg, params),
@@ -4400,20 +4576,28 @@ class Plugin:
         if not handler:
             return {"success": False, "message": f"Unknown action: {action}"}
         try:
-            return handler(settings, logger)
+            result = handler(settings, logger)
+            if action == "refresh_settings" and isinstance(result, dict) and result.get("success"):
+                # Settings pickers (EPG sources, channel groups) are a snapshot taken when the
+                # plugin loads; ask Dispatcharr 0.34+ to reload just this plugin so they
+                # reflect the current sources/groups. Older hosts ignore the directive.
+                result["_dispatcharr"] = {"refresh": "plugin"}
+            return result
         except Exception as e:
             LOGGER.exception(f"EPG & Sports Editor: action '{action}' raised an exception")
             return {"success": False, "message": f"Error: {e}"}
 
     # ── Actions ───────────────────────────────────────────────────────────
 
-    def _action_setup(self, settings, logger):
+    def _action_setup(self, settings, logger, progress=None):
+        progress = progress or (lambda *a, **k: None)
         enabled = self._get_enabled_sources(settings)
         if not enabled:
             return {"success": False, "message": "No sources enabled. Toggle at least one source on and try again."}
 
         lines = []
-        for source in enabled:
+        for i, source in enumerate(enabled):
+            progress(int(100 * i / len(enabled)), f"Setting up '{source.name}' ({i + 1}/{len(enabled)})")
             virtual, created = self._get_or_create_virtual(source)
             virtual_map = self._sync_epgdata(source, virtual)
             total = self._do_transform_source(source, settings)
@@ -4428,12 +4612,24 @@ class Plugin:
             lines.append("")
 
         lines.append("Auto-sync active — transforms run automatically after every EPG refresh.")
+        progress(100, "Setup complete")
         return {"success": True, "message": "\n".join(lines)}
 
-    def _action_apply_now(self, settings, logger):
+    def _action_apply_now(self, settings, logger, progress=None, background=False):
+        progress = progress or (lambda *a, **k: None)
         enabled = self._get_enabled_sources(settings)
         if not enabled:
             return {"success": False, "message": "No sources enabled."}
+        if background:
+            # Running as a Dispatcharr 0.34+ async task: no HTTP timeout to race, so do the
+            # work inline with progress (the thread/handoff below is for hosts without it).
+            lines = ["Transform complete:\n"]
+            for i, source in enumerate(enabled):
+                progress(int(100 * i / len(enabled)), f"Transforming '{source.name}' ({i + 1}/{len(enabled)})")
+                total = self._do_transform_source(source, settings)
+                lines.append(f"  {source.name}: {total:,} programs written")
+            progress(100, "Apply Rules complete")
+            return {"success": True, "message": "\n".join(lines)}
         # This is an HTTP request and nginx cuts it off at ~50s (a 504 in the UI) however
         # long the work takes, so do it on a worker and report back only if it finishes in
         # time; otherwise it carries on and the result goes to the log.
@@ -4807,7 +5003,7 @@ class Plugin:
         from apps.channels.models import Channel
         from apps.epg.models import EPGSource
 
-        fill_group_names = {g.strip() for g in (settings.get('fill_groups') or '').split(',') if g.strip()}
+        fill_group_names = set(_resolve_group_names(settings.get('fill_groups')))
 
         from django.db.models import Q
 
@@ -4864,10 +5060,11 @@ class Plugin:
     def _action_fill_epg(self, settings, logger):
         from apps.epg.models import EPGSource, EPGData, ProgramData
 
-        fill_group_names = [g.strip() for g in (settings.get('fill_groups') or '').split(',') if g.strip()]
+        fill_group_names = _as_name_list(settings.get('fill_groups'))
         if not fill_group_names:
             return {"success": False, "message": "No Fill Groups configured. Add group names in Settings → EPG Fill."}
 
+        fill_group_names = _resolve_group_names(fill_group_names) or fill_group_names
         block_hours = int(settings.get('fill_block_hours') or 1)
         days_ahead = int(settings.get('fill_days_ahead') or 14)
 
@@ -5038,7 +5235,8 @@ class Plugin:
 
         return segments
 
-    def _action_teardown(self, settings, logger):
+    def _action_teardown(self, settings, logger, progress=None):
+        progress = progress or (lambda *a, **k: None)
         from apps.epg.models import EPGSource, EPGData
         from apps.channels.models import Channel
 
@@ -5049,7 +5247,8 @@ class Plugin:
             return {"success": False, "message": "No virtual EPGs found to remove."}
 
         lines = ["Teardown complete:\n"]
-        for source in enabled:
+        for i, source in enumerate(enabled):
+            progress(int(100 * i / max(len(enabled), 1)), f"Removing virtual EPG for '{source.name}' ({i + 1}/{len(enabled)})")
             virtual_name = f"{VIRTUAL_PREFIX}{source.name}"
             try:
                 virtual = EPGSource.objects.get(name=virtual_name)
@@ -5085,58 +5284,11 @@ class Plugin:
             pass
 
         self._disconnect_signal()
+        progress(100, "Teardown complete")
         return {"success": True, "message": "\n".join(lines)}
 
-    def _action_restart_dispatcharr(self, settings, logger):
-        """Send SIGHUP to Dispatcharr's WSGI master process instead of actually
-        restarting the container — both uWSGI and gunicorn treat SIGHUP to their
-        master as a graceful reload of the whole app (including freshly-updated
-        plugin code), in a couple seconds, without a real container bounce.
+    def _action_refresh_settings(self, settings, logger):
+        return {"success": True, "message": (
+            "Reloading the plugin so the settings lists pick up the current EPG sources, "
+            "channel groups and sport templates. Reopen this page if the lists look unchanged.")}
 
-        Dispatcharr's own docker/entrypoint.sh always launches uWSGI (never
-        gunicorn, in every mode: dev/debug/modular/production) — confirmed by
-        reading it directly, not assumed. uwsgi is tried first for that reason;
-        gunicorn is kept as a fallback for any environment that does run it.
-        PID 1 (the entrypoint script) is the last resort, but empirically does
-        nothing useful here — it has no SIGHUP trap (only TERM/INT), so this
-        only matters if neither WSGI server is found running as expected.
-
-        Uses `pgrep -o <name>` (bare process name, no `-f`) rather than `-of` —
-        `-f` matches the full command line, which self-matches pgrep's own
-        argv (it contains the search string as its last argument) and returns
-        a false-positive PID for whichever server name isn't actually running.
-        Confirmed this exact false-positive against gunicorn in dispatch-test
-        before switching to `-o`."""
-        import os
-        import signal as _signal
-        import subprocess
-        import threading
-        import time
-
-        def _find_master_pid(proc_name):
-            result = subprocess.run(
-                ["pgrep", "-o", proc_name],
-                capture_output=True, text=True,
-            )
-            pid = (result.stdout or "").strip()
-            return int(pid) if pid else None
-
-        def _do_restart():
-            time.sleep(2)
-            for proc_name in ("uwsgi", "gunicorn"):
-                pid = _find_master_pid(proc_name)
-                if pid:
-                    LOGGER.info(f"EPG & Sports Editor: sending SIGHUP to {proc_name} master PID {pid}")
-                    try:
-                        os.kill(pid, _signal.SIGHUP)
-                        return
-                    except Exception as e:
-                        LOGGER.warning(f"EPG & Sports Editor: SIGHUP to {proc_name} PID {pid} failed ({e})")
-            LOGGER.warning("EPG & Sports Editor: no uwsgi/gunicorn master found, falling back to PID 1")
-            try:
-                os.kill(1, _signal.SIGHUP)
-            except Exception as e2:
-                LOGGER.error(f"EPG & Sports Editor: restart failed: {e2}")
-
-        threading.Thread(target=_do_restart, daemon=True).start()
-        return {"success": True, "message": "Restart signal sent. Dispatcharr will reload in ~2 seconds.\n\nRefresh this page in about 15 seconds."}
