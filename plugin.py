@@ -1275,7 +1275,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.6.0"
+    version = "0.6.01"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -4170,8 +4170,13 @@ class Plugin:
                     res = parse_programs_for_tvg_id.apply(args=[eid])
                 if res.failed():
                     LOGGER.warning(f"EPG & Sports Editor: re-parse of EPG entry {eid} failed: {res.result}")
+                elif res.result is None or (isinstance(res.result, str)
+                                            and res.result.strip().lower().startswith("sd guide fetch complete")):
+                    # XMLTV parses return None; Schedules Direct entries return
+                    # "SD guide fetch complete" on success (issue #34)
+                    done += 1
                 elif res.result is not None:
-                    # a successful parse returns None; anything else is a skip reason
+                    # anything else is a skip reason
                     # ("Deferred", "Task already running", "EPG not found", ...)
                     LOGGER.warning(f"EPG & Sports Editor: re-parse of EPG entry {eid} did not run: {res.result}")
                 else:
