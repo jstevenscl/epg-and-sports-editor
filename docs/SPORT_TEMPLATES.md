@@ -75,7 +75,7 @@ Every field comes pre-filled with a sensible starter template (see [Starter Temp
 
 ### Pregame and Postgame windows
 
-Two global dropdowns in the Sports Editor section (just above **Local Display Timezone**) control how long a matched channel is treated as "about to start" and "just finished". They apply to every sport and every channel group.
+Two global dropdowns in the **Sports Editor — Global Settings** section (below the channel groups, above **Local Display Timezone**) control how long a matched channel is treated as "about to start" and "just finished". They apply to every sport and every channel group.
 
 ![Pregame Window, Postgame Window, and Hide Past-Date Channels After settings, above Local Display Timezone](screenshots/10_pregame_postgame_windows.png)
 
@@ -147,6 +147,45 @@ EPG & Sports Editor: ACCOUNT SUMMARY 'My Provider':   hidden this pass 2105 'Nam
 The indented lines list channels created in the last 30 minutes (with their creation time and whether they were created hidden) and channels hidden during the pass, each labelled **by past-date hide** or **NOT by plugin past-date hide**. Only channels auto-created by that account are counted: a refresh of one provider never changes another provider's channels.
 
 **"Past" is calculated in real UTC time, never your own local time zone — a viewer far ahead of US time zones (e.g. New Zealand) will not get channels hidden early.** The date/time text embedded in a channel's name (`SEP 27 8:50 PM ET`) is parsed using the time zone written *in that text* (`ET`/`CT`/`MT`/`PT`/`UK` follow that region's real daylight-saving rules as of v0.5.16; `EDT`/`EST`/`CDT`/`CST`/`MDT`/`MST`/`PDT`/`PST`, `UTC`/`GMT`, `BST`, `NZDT`/`NZST`, `AEDT`/`AEST` are fixed; `CST` means US Central and `PST` US Pacific) and converted to one specific real-world UTC instant. A time with **no** zone written is read as US Eastern. A time whose zone the plugin can't read (`CET`, `JST`, `IST`, `+03`, …) is never used to hide a channel — the channel stays visible rather than being hidden on a guess. That instant — the same instant everywhere on Earth. That instant, plus a small grace buffer, is then compared against the actual current UTC time. Your own clock, calendar date, or **Local Display Timezone** setting never enters this calculation at all — a NZ viewer being ~16–21 hours ahead of US Eastern cannot make a game look "already past" any sooner than it would for a viewer sitting in that same US time zone. It never checks "has the calendar date SEP 27 passed" (which is the thing that *would* break for a viewer far ahead); it checks "has enough real elapsed time passed since that exact moment."
+
+### Merging duplicate game channels from different providers (v0.6.02+)
+
+If you have several IPTV providers, each one usually creates its own channel for the same game, so one game can show up as three or four identical channels. Turn on **Merge duplicate game channels from different providers** in a channel group's section to collapse them into one.
+
+![The Merge duplicate game channels from different providers toggle, in a channel group's section](screenshots/v061_merge_duplicate_channels_toggle.png)
+
+**What it does.** When channels from different M3U accounts are matched to the *same* game, the plugin keeps one of them visible (normally the one with the lowest channel number), adds the other providers' streams to it as backups, and hides the other channels. Dispatcharr tries a channel's streams in order, so if the first provider's stream fails or buffers, the next provider's takes over.
+
+![One game channel with three streams, one per provider, and the two hidden duplicate channels below it](screenshots/v061_merged_channel_hidden_duplicates.png)
+
+In that example, channel 90179 is the visible channel and carries a stream from each of three providers. Channels 98000 and 98500 are the duplicates, hidden from the guide and from your clients.
+
+**Why the extra channels are hidden instead of deleted.** Dispatcharr's Auto Channel Sync gives every provider stream a channel of its own. If a duplicate channel were deleted, or its stream moved, the provider's next refresh would create it again. A hidden channel that still holds its own stream is left alone, so the merge stays in place across refreshes. The streams are *copied* to the visible channel, not moved.
+
+**How it decides two channels are the same game.** Both channels must have been matched to the same schedule entry: same kickoff time and the same two sides (and, for providers that run separate HOME/AWAY feeds, the same feed). It does not compare channel names.
+
+**What it never merges**
+- Channels from the **same** M3U account, even if they are the same game.
+- A channel you hid yourself.
+- **Network channels.** A channel named after a broadcast network (`ESPN2`, `NCAAF 06: ABC`, anything matched through [Network Channels](../README.md#network-channels) rather than by its two teams) is never merged. Two networks carrying the same game are different channels, and merging them would make one of them disappear from your guide.
+- Channels that were not matched to a game, or whose game has already finished.
+
+**It undoes itself.** A merge is released, the hidden channel is shown again and the streams the plugin added are removed from the visible channel, when:
+- the game is over (its Pregame, Live and Postgame blocks have all ended);
+- a provider reuses a channel slot for a different game;
+- you turn **Merge duplicate game channels** off for the group, or turn the Sports Editor off for every group (or remove its Sport Template) the next time a pass or **Run Sport Templates Now** runs;
+- the visible channel disappears. Another channel for that game then takes over as the visible one.
+
+**Setting it up.** Open the channel group's section, make sure a **Sport Template** is selected, and turn on **Merge duplicate game channels from different providers**. It works across every group that has the toggle on, so turn it on for each group your providers use for the same sport. If your providers put the same sport in different groups, enable it on each of them.
+
+**After updating from an earlier version.** The merge needs to know which game each channel was matched to, and the plugin records that when it matches a channel. Channels matched by an earlier version get it the next time their provider refreshes, or right away if you click **Run Sport Templates Now** (Actions). Until then those channels are simply left as they are.
+
+**Things to know**
+- A stream that a provider has dropped stays attached for as long as Dispatcharr keeps it as a stale stream, the same as it does on any channel.
+- If **Hide auto-created channels with a past date** is also on for the group, the two features cooperate: the hidden duplicates are not un-hidden by it.
+- **Release Stuck Hidden Channels** leaves merged duplicates alone too.
+
+**Checking what it did.** Each time the merge changes something, the plugin log has a line like `duplicate merge: channel 56853 'Georgia Bulldogs @ South Carolina Gamecocks' now has 2 added backup stream(s); hid 2 duplicate channel(s) [56883, 56886]`, and `duplicate merge: un-hid ...` / `removed ... added stream(s)` when it releases one.
 
 ## Step 4 — Run it
 
@@ -316,9 +355,11 @@ All of these are available in every template field (Channel Name, Logo URL, and 
 **UTC vs. ET/CT — what's actually timezone-dependent and what isn't:**
 - The **stored program times** (where each block starts/ends in your TV Guide) are always UTC, same as everything else in Dispatcharr's database — this is fully timezone-neutral and works correctly for viewers anywhere in the world regardless of which time-format variables you use in your templates. The schedule feed's game times, the matching window and the game start/end are all UTC too. The one place a timezone enters the *placement* of a block is the default **All day** Pregame Window, whose "midnight" is taken in your Local Display Timezone (US Eastern if blank) — see [Pregame and Postgame windows](#pregame-and-postgame-windows).
 - The **`{start_short}` / `{start_day}` / `{start_date}` / `{start_time_et_ct}` variables** are US Eastern/Central-formatted text, since that's the broadcast-standard convention for the leagues SDP covers (NFL, NBA, MLB, NHL, NCAA, MLS are all US sports). Use the `_utc` variants (`{start_short_utc}`, `{start_day_utc}`, `{start_date_utc}`, `{start_time_utc}`) instead if you'd rather your titles/descriptions read in UTC.
-- If your audience is mostly outside the US, set **Local Display Timezone** (in the Sports Editor section, an IANA zone name like `Europe/London` or `Australia/Sydney`) to unlock the `_local` variants (`{start_short_local}`, `{start_day_local}`, `{start_date_local}`, `{start_time_local}`) — DST-correct, unlike doing arithmetic on a UTC string. This is one setting for the whole Dispatcharr instance, not per-viewer: every viewer sees the same local time, since these EPG titles/descriptions are generated once server-side rather than rendered per-viewer at watch time. Leave it blank (the default) and the `_local` variables just render as empty strings — every existing template using only `_utc`/`_et_ct` is unaffected.
+- If your audience is mostly outside the US, set **Local Display Timezone** (in the **Sports Editor — Global Settings** section, an IANA zone name like `Europe/London` or `Australia/Sydney`) to unlock the `_local` variants (`{start_short_local}`, `{start_day_local}`, `{start_date_local}`, `{start_time_local}`) — DST-correct, unlike doing arithmetic on a UTC string. This is one setting for the whole Dispatcharr instance, not per-viewer: every viewer sees the same local time, since these EPG titles/descriptions are generated once server-side rather than rendered per-viewer at watch time. Leave it blank (the default) and the `_local` variables just render as empty strings — every existing template using only `_utc`/`_et_ct` is unaffected.
 
-![Local Display Timezone setting, just above the SPORT TEMPLATES section](screenshots/09_local_display_timezone.png)
+![Local Display Timezone, in the Sports Editor — Global Settings section just above Sport Templates](screenshots/09_local_display_timezone.png)
+
+![The Sports Editor — Global Settings section, below the channel group sections](screenshots/v061_global_settings_section.png)
 
 ---
 

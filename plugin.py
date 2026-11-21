@@ -365,6 +365,43 @@ def _past_grace_hours(settings):
 
 
 GAME_START_PROP_KEY = "game_start_utc"
+# Identity of the game a channel was matched to (see _event_merge_key); stored next to
+# game_start_utc on the generated ProgramData so the "merge duplicate game channels"
+# pass can compare channels from different M3U accounts without re-matching them.
+GAME_KEY_PROP_KEY = "game_key"
+# Durable state of the "merge duplicate game channels" feature, on the Sports Editor
+# EPGSource's custom_properties (same reasoning as HIDDEN_PAST_CHANNELS_PROP_KEY):
+#   {"<primary channel id>": {"dups": [hidden duplicate channel ids],
+#                             "streams": [stream ids this feature copied onto the primary]}}
+MERGED_DUPES_PROP_KEY = "merged_duplicate_channels"
+
+
+def _event_merge_key(event, feed_tag=""):
+    """Stable identity for a matched game: kickoff + both sides (+ tournament and HOME/
+    AWAY feed tag). Deliberately NOT the league slug — a game can sit under two pooled
+    slugs (see _SPORT_SLUG_POOL) and channels matched via either are still the same game.
+    None when the event has no usable identity, so unrelated games are never merged."""
+    def norm(s):
+        return re.sub(r"[^a-z0-9]+", "", str(s or "").lower())
+    start = event.get("start_time_utc") or ""
+    away = event.get("away_team_name") or event.get("away_team_abbr") or ""
+    home = event.get("home_team_name") or event.get("home_team_abbr") or ""
+    if not start or not (norm(away) or norm(home)):
+        return None
+    return "|".join([start, norm(away), norm(home), norm(event.get("tournament_name")), norm(feed_tag)])
+
+
+def _merged_dup_ids(epg_source):
+    """Channel ids currently hidden as merged duplicates (read from the loaded EPGSource)."""
+    out = set()
+    state = (getattr(epg_source, "custom_properties", None) or {}).get(MERGED_DUPES_PROP_KEY) or {}
+    for entry in state.values():
+        for d in (entry or {}).get("dups") or ():
+            try:
+                out.add(int(d))
+            except (TypeError, ValueError):
+                pass
+    return out
 
 
 def _generated_game_start(ch):
@@ -1275,7 +1312,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.6.01"
+    version = "0.6.02"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1582,6 +1619,24 @@ class Plugin:
                         "v0.26.0+ (older versions don't have the hidden-from-output field)."
                     ),
                 },
+                {
+                    "id": f"sports_editor_{gid}_merge_dupes",
+                    "label": "Merge duplicate game channels from different providers",
+                    "type": "boolean",
+                    "default": False,
+                    "help_text": (
+                        "When several M3U accounts each create their own channel for the SAME game "
+                        "(matched to the same schedule entry), keep one channel and add the other "
+                        "providers' streams to it as backups (the first stream plays; if it buffers "
+                        "or fails, the next takes over), then hide the extra channels. Works across "
+                        "every group that has this turned on. The extra channels are only hidden — "
+                        "never deleted — so provider sync does not recreate them, and they are "
+                        "restored automatically (and the added streams removed) once the game is "
+                        "over or a channel is reused for another game. Channels from the same "
+                        "provider are never merged with each other, and a channel you hid yourself "
+                        "is left alone. Needs a Sport Template selected above."
+                    ),
+                },
             ]
 
         if not groups:
@@ -1595,6 +1650,16 @@ class Plugin:
                     "Sports Editor for it."
                 ),
             })
+
+        # Without its own header these global settings would be attached to the last
+        # per-group section by _apply_sections (GH #36: Local Display Timezone was
+        # hidden inside a collapsed channel-group accordion).
+        fields.append({
+            "id": "_section_sports_editor_global",
+            "label": "══════════ SPORTS EDITOR — GLOBAL SETTINGS ══════════",
+            "type": "info",
+            "description": "Settings that apply to every channel group above and to all Sport Templates.",
+        })
 
         fields.append({
             "id": "sports_editor_gamethumbs_url",
@@ -2310,7 +2375,7 @@ class Plugin:
         post_save.disconnect(sender=Channel, dispatch_uid=self._hide_audit_uid + "_post")
 
     @staticmethod
-    def _log_untracked_hidden(group, hidden_ids, source):
+    def _log_untracked_hidden(group, hidden_ids, source, merged_ids=frozenset()):
         """Diagnostic: channels in this group that are hidden but NOT hidden by the
         past-date feature (user, Dispatcharr UI/API, another tool). Newly seen ones are
         listed with created/updated times; already-seen ones are only counted, so a
@@ -2320,7 +2385,7 @@ class Plugin:
             from apps.channels.models import Channel
             rows = list(
                 Channel.objects.filter(channel_group_id=group.id, auto_created=True, hidden_from_output=True)
-                .exclude(id__in=list(hidden_ids))
+                .exclude(id__in=list(hidden_ids) + list(merged_ids))
                 .values_list("id", "name", "created_at", "updated_at")
             )
             if not rows:
@@ -3399,6 +3464,178 @@ class Plugin:
                 result.append((group, sport))
         return result
 
+    def _merge_duplicate_channels(self, settings, sport_groups, epg_source):
+        """"Merge duplicate game channels from different providers" (opt-in per group, GH #35).
+
+        Channels matched to the SAME game (same GAME_KEY_PROP_KEY on their generated EPG)
+        are collapsed onto one primary channel: the other providers' streams are COPIED
+        onto it as lower-priority backups, and the duplicate channels are only HIDDEN —
+        never deleted and their streams never moved. That is deliberate: Dispatcharr's
+        auto channel sync re-creates any stream that is no longer on a channel owned by its
+        own M3U account (so deleting/moving would bring the duplicate straight back), but
+        it leaves hidden channels alone and never strips extra streams from a channel.
+
+        Each pass recomputes the full desired state from the database and reconciles the
+        saved state (MERGED_DUPES_PROP_KEY) against it: duplicates that stop qualifying
+        (game over, slot reused by the provider for another game, setting turned off) are
+        un-hidden and the streams this feature copied are removed again. Channels from the
+        same M3U account are never merged (a stream shared by two channels of one account
+        would confuse that account's own sync), and a channel hidden by anything else is
+        never touched. Returns True if anything changed."""
+        from django.db import transaction
+        from apps.epg.models import EPGSource, ProgramData
+        from apps.channels.models import Channel, ChannelStream
+
+        on_groups = [g for g, _ in sport_groups if settings.get(f"sports_editor_{g.id}_merge_dupes")]
+        changed = False
+        with transaction.atomic():
+            src = EPGSource.objects.select_for_update().get(pk=epg_source.pk)
+            props = dict(src.custom_properties or {})
+            old_state = props.get(MERGED_DUPES_PROP_KEY) or {}
+            prev_dups = _merged_dup_ids(src)
+            prev_primaries = set()
+            for k in old_state:
+                try:
+                    prev_primaries.add(int(k))
+                except (TypeError, ValueError):
+                    pass
+
+            desired = {}
+            names = {}
+            if on_groups:
+                channels = list(Channel.objects.filter(auto_created=True, channel_group__in=on_groups))
+                names = {c.id: c.name for c in channels}
+                by_tvg = {f"epg-and-sports-editor-sports-{c.id}": c for c in channels}
+                keys = {}
+                # Only games whose generated guide still has an unfinished block qualify: once a
+                # game's Pregame/Live/Postgame window has fully ended its duplicates are released
+                # (Dispatcharr never cleans up hidden channels, so they would otherwise stay
+                # merged and hidden forever).
+                from datetime import datetime, timezone
+                rows = ProgramData.objects.filter(
+                    epg__tvg_id__in=list(by_tvg), custom_properties__has_key=GAME_KEY_PROP_KEY,
+                    end_time__gt=datetime.now(timezone.utc),
+                ).values_list("epg__tvg_id", "epg__name", "custom_properties")
+                for tid, ename, cp in rows:
+                    ch = by_tvg[tid]
+                    # Only trust a key while the channel still has the name we wrote.
+                    if ename == ch.name and ch.id not in keys:
+                        keys[ch.id] = (cp or {}).get(GAME_KEY_PROP_KEY)
+
+                by_key = {}
+                for c in channels:
+                    key = keys.get(c.id)
+                    if not key:
+                        continue
+                    if c.hidden_from_output and c.id not in prev_dups:
+                        continue            # hidden by the user/something else: leave it alone
+                    by_key.setdefault(key, []).append(c)
+
+                big = float("inf")
+                for key, members in by_key.items():
+                    if len(members) < 2:
+                        continue
+                    members.sort(key=lambda c: (
+                        c.id in prev_dups, c.id not in prev_primaries,
+                        c.channel_number if c.channel_number is not None else big, c.id,
+                    ))
+                    primary = members[0]
+                    dups = [c for c in members[1:] if c.auto_created_by_id != primary.auto_created_by_id]
+                    if not dups:
+                        continue
+                    old_copied = set((old_state.get(str(primary.id)) or {}).get("streams") or ())
+                    own = set(
+                        ChannelStream.objects.filter(channel_id=primary.id).values_list("stream_id", flat=True)
+                    ) - old_copied
+                    copied = []
+                    for d in dups:
+                        for sid in ChannelStream.objects.filter(channel_id=d.id).order_by("order").values_list(
+                                "stream_id", flat=True):
+                            if sid not in own and sid not in copied:
+                                copied.append(sid)
+                    desired[primary.id] = {"dups": [d.id for d in dups], "streams": copied}
+
+            # 1) Release whatever no longer qualifies (before hiding, so a duplicate that
+            #    moved to another primary is not un-hidden after being re-hidden).
+            for pid_s, entry in old_state.items():
+                try:
+                    pid = int(pid_s)
+                except (TypeError, ValueError):
+                    continue
+                new = desired.get(pid) or {}
+                release = set(int(x) for x in (entry or {}).get("dups") or ()) - set(new.get("dups") or ())
+                if release:
+                    n = Channel.objects.filter(pk__in=release, hidden_from_output=True).update(hidden_from_output=False)
+                    if n:
+                        changed = True
+                        LOGGER.info(f"EPG & Sports Editor: duplicate merge: un-hid {n} channel(s) previously merged into channel {pid}")
+                stale = set(int(x) for x in (entry or {}).get("streams") or ()) - set(new.get("streams") or ())
+                if stale:
+                    n, _ = ChannelStream.objects.filter(channel_id=pid, stream_id__in=stale).delete()
+                    if n:
+                        changed = True
+                        LOGGER.info(f"EPG & Sports Editor: duplicate merge: removed {n} added stream(s) from channel {pid}")
+
+            # 2) Apply: copy streams onto each primary, then hide its duplicates.
+            for pid, entry in desired.items():
+                existing = list(ChannelStream.objects.filter(channel_id=pid).values_list("stream_id", "order"))
+                have = {sid for sid, _ in existing}
+                order = max([o for _, o in existing] or [-1]) + 1
+                added = 0
+                for sid in entry["streams"]:
+                    if sid not in have:
+                        ChannelStream.objects.create(channel_id=pid, stream_id=sid, order=order)
+                        order += 1
+                        added += 1
+                n = Channel.objects.filter(pk__in=entry["dups"], hidden_from_output=False).update(hidden_from_output=True)
+                if added or n:
+                    changed = True
+                    LOGGER.info(
+                        f"EPG & Sports Editor: duplicate merge: channel {pid} '{names.get(pid, '')}' now has "
+                        f"{added} added backup stream(s); hid {n} duplicate channel(s) {entry['dups']}"
+                    )
+
+            new_state = {str(pid): {"dups": sorted(e["dups"]), "streams": e["streams"]} for pid, e in desired.items()}
+            if new_state != old_state:
+                if new_state:
+                    props[MERGED_DUPES_PROP_KEY] = new_state
+                else:
+                    props.pop(MERGED_DUPES_PROP_KEY, None)
+                EPGSource.objects.filter(pk=src.pk).update(custom_properties=props)
+                epg_source.custom_properties = props
+        return changed
+
+    def _raw_names_are_network_only(self, ch, strip_noise):
+        """True when every provider stream name on `ch` has a network code but no 'Team @ Team'
+        shape — i.e. the channel is a NETWORK feed (ESPN, ESPN2, 'NCAAF 06: ABC'), whatever it
+        has since been renamed to. Such channels are never merged: two networks carrying the
+        same game are different channels. On any error this answers True (treat as a network
+        channel), so a failure here can only ever skip a merge, never merge channels wrongly."""
+        try:
+            names = list(ch.streams.values_list("name", flat=True))
+            return bool(names) and all(
+                self._extract_matchup_teams(n, strip_noise=strip_noise) is None and self._extract_network_code(n)
+                for n in names
+            )
+        except Exception:
+            return True
+
+    def _release_merges_if_any(self, settings):
+        """Called when a pass finds NO Sports Editor group enabled with a Sport Template. The
+        normal merge pass never runs then (the callers return early), so merged duplicates
+        would stay hidden with their added streams still on the primary and no UI path to
+        undo it. Reconcile against an empty set of groups, which releases everything.
+        Never creates the Sports Editor EPG source and does nothing if no merge is recorded."""
+        try:
+            from apps.epg.models import EPGSource
+            src = EPGSource.objects.filter(name=SPORTS_EPG_SOURCE_NAME).first()
+            if src is None or not (src.custom_properties or {}).get(MERGED_DUPES_PROP_KEY):
+                return False
+            return bool(self._merge_duplicate_channels(settings, [], src))
+        except Exception as e:
+            LOGGER.warning(f"EPG & Sports Editor: could not release merged duplicates: {e}")
+            return False
+
     def _load_hidden_past_state(self, epg_source):
         """(working_set, persisted_snapshot). `working_set` is mutated by
         _apply_past_date_hide; `persisted_snapshot` is what the DB held at load time,
@@ -3442,7 +3679,7 @@ class Plugin:
 
     @staticmethod
     def _apply_past_date_hide(ch, matched, hide_setting_on, hidden_ids, grace_hours=PAST_CHANNEL_GRACE_HOURS,
-                              provider_tz=None, stale_when=None):
+                              provider_tz=None, stale_when=None, merged_ids=frozenset()):
         """"Hide auto-created channels with a past date in their name" — opt-in per
         group. `hidden_ids` is the persistent set of Channel ids THIS feature has
         hidden (see HIDDEN_PAST_CHANNELS_PROP_KEY); mutated in place. Never hides a
@@ -3462,7 +3699,7 @@ class Plugin:
                     LOGGER.info(f"EPG & Sports Editor: un-hid channel {ch.id} '{ch.name}' (past-date hide: now matches a current game)")
                 hidden_ids.discard(ch.id)
                 return True
-            if hide_setting_on and ch.hidden_from_output:
+            if hide_setting_on and ch.hidden_from_output and ch.id not in merged_ids:
                 # Hidden, but not by us as far as our records go: typically a channel hidden
                 # under an old game's name before hides were tracked durably (<= v0.5.14),
                 # whose provider slot was later reused for a live game (Dispatcharr's auto
@@ -3600,7 +3837,7 @@ class Plugin:
         )
 
     @staticmethod
-    def _log_hidden_diff(group, hide_setting_on, before, after, hidden_ids, source):
+    def _log_hidden_diff(group, hide_setting_on, before, after, hidden_ids, source, merged_ids=frozenset()):
         """Log hidden_from_output changes across one group's pass. A channel that
         became hidden without this plugin's past-date feature doing it (setting off,
         or not in our tracked set) points at something outside the plugin."""
@@ -3616,7 +3853,7 @@ class Plugin:
         for i, n in list(newly_hidden.items())[:20]:
             LOGGER.info(
                 f"EPG & Sports Editor: [{source}]   hidden during pass: {i} '{n}' "
-                f"({'by past-date hide' if (hide_setting_on and i in hidden_ids) else 'NOT by plugin past-date hide'})"
+                f"({'by past-date hide' if (hide_setting_on and i in hidden_ids) else 'by duplicate merge' if i in merged_ids else 'NOT by plugin past-date hide'})"
             )
 
     STALE_LOOKBACK_DAYS = 14
@@ -3661,12 +3898,17 @@ class Plugin:
         feed_tag = self._extract_feed_tag(ch.name) if strip_noise else ""
 
         event = None
+        # True when the match came from the channel's NETWORK rather than its two teams: ESPN
+        # and ESPN2 carrying the same game are different channels, so a network match must
+        # never be merged with another provider's (see _event_merge_key use below).
+        by_network = False
         if sport_slug == _ANY_SPORT_VALUE:
             # "Any Sport" groups are for channels that are just a network (a bare
             # "ESPN2" or "ABC"), not tied to one league — see _find_sdp_event_by_network.
             network_code = self._extract_network_code(ch.name)
             if network_code:
                 event = self._find_sdp_event_by_network(network_code, sport_slug, events)
+                by_network = True
         elif mode == "single_title":
             title_text = self._strip_provider_noise(ch.name)
             if not title_text:
@@ -3690,6 +3932,7 @@ class Plugin:
                 network_code = self._extract_network_code(ch.name)
                 if network_code:
                     event = self._find_sdp_event_by_network(network_code, sport_slug, events)
+                    by_network = True
         if not event:
             return False
 
@@ -3762,6 +4005,13 @@ class Plugin:
         logo_url_tpl = settings.get(f"sport_tpl_{template_slug}_logo_url") or defaults["logo_url"]
         logo_url = self._render_sports_template(logo_url_tpl, vars_base)
 
+        if not by_network:
+            # The first pass renames a network channel ("NCAAF 06: ABC") to the game name, so on
+            # every later pass it looks like a team-matched channel. Its provider's raw stream
+            # name still tells the truth: no team matchup, only a network.
+            by_network = self._raw_names_are_network_only(ch, strip_noise)
+        game_key = None if by_network else _event_merge_key(event, feed_tag)
+
         tvg_id = f"epg-and-sports-editor-sports-{ch.id}"
         epg_entry, _ = EPGData.objects.get_or_create(
             tvg_id=tvg_id, epg_source=epg_source, defaults={"name": ch.name, "icon_url": ""},
@@ -3804,7 +4054,8 @@ class Plugin:
                 # later hide decision never has to re-parse the local time this plugin rendered
                 # into the channel name (zone abbreviations like CET/JST/"+03" can't be read back).
                 custom_properties={**({"icon": logo_url} if logo_url else {}),
-                                   GAME_START_PROP_KEY: start.isoformat()},
+                                   GAME_START_PROP_KEY: start.isoformat(),
+                                   **({GAME_KEY_PROP_KEY: game_key} if game_key else {})},
             ))
         ProgramData.objects.bulk_create(batch)
 
@@ -3829,6 +4080,8 @@ class Plugin:
 
         sport_groups = self._enabled_sport_template_groups(settings)
         if not sport_groups:
+            if self._release_merges_if_any(settings):
+                _invalidate_epg_output_cache()
             return {"matched": 0, "scanned": 0}
 
         events = self._fetch_sdp_schedule(settings)
@@ -3838,6 +4091,7 @@ class Plugin:
         epg_source = self._sports_editor_epg_source()
         hidden_ids, hidden_persisted = self._load_hidden_past_state(epg_source)
         hidden_ids_changed = False
+        merged_ids = _merged_dup_ids(epg_source)
         grace_hours = _past_grace_hours(settings)
         provider_tz = None
         matched = scanned = 0
@@ -3848,7 +4102,7 @@ class Plugin:
                     auto_created=True, auto_created_by=m3u_account, channel_group=group,
                 )
                 hidden_before = self._hidden_channel_snapshot(group.id)
-                self._log_untracked_hidden(group, hidden_ids, "auto")
+                self._log_untracked_hidden(group, hidden_ids, "auto", merged_ids)
                 for ch in channels:
                     scanned += 1
                     try:
@@ -3857,19 +4111,24 @@ class Plugin:
                             matched += 1
                         stale_when = None if is_matched or not hide_setting_on else self._stale_game_start(ch, sport, events)
                         if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours, provider_tz,
-                                                      stale_when=stale_when):
+                                                      stale_when=stale_when, merged_ids=merged_ids):
                             hidden_ids_changed = True
                     except Exception as e:
                         LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
                 self._log_hidden_diff(
                     group, hide_setting_on, hidden_before, self._hidden_channel_snapshot(group.id),
-                    hidden_ids, "auto",
+                    hidden_ids, "auto", merged_ids,
                 )
             # Same transaction as the hide/un-hide UPDATEs above, so the ownership marker
             # and hidden_from_output can never disagree after a crash mid-pass.
             if hidden_ids_changed or hidden_ids != hidden_persisted:
                 self._save_hidden_past_state(epg_source, hidden_ids, hidden_persisted)
-        if matched:
+            try:
+                merged_changed = self._merge_duplicate_channels(settings, sport_groups, epg_source)
+            except Exception as e:
+                merged_changed = False
+                LOGGER.warning(f"EPG & Sports Editor: duplicate-channel merge failed: {e}")
+        if matched or merged_changed:
             _invalidate_epg_output_cache()
         self._mark_epg_source_success(
             epg_source, f"Sports Editor: {matched} channel(s) matched, {scanned} scanned"
@@ -3883,6 +4142,8 @@ class Plugin:
 
         sport_groups = self._enabled_sport_template_groups(settings)
         if not sport_groups:
+            if self._release_merges_if_any(settings):
+                _invalidate_epg_output_cache()
             return {
                 "success": False,
                 "message": (
@@ -3904,6 +4165,7 @@ class Plugin:
         epg_source = self._sports_editor_epg_source()
         hidden_ids, hidden_persisted = self._load_hidden_past_state(epg_source)
         hidden_ids_changed = False
+        merged_ids = _merged_dup_ids(epg_source)
         grace_hours = _past_grace_hours(settings)
         provider_tz = None
         lines = []
@@ -3913,7 +4175,7 @@ class Plugin:
                 hide_setting_on = bool(settings.get(f"sports_editor_{group.id}_hide_past"))
                 channels = list(Channel.objects.filter(auto_created=True, channel_group=group))
                 hidden_before = self._hidden_channel_snapshot(group.id)
-                self._log_untracked_hidden(group, hidden_ids, "manual")
+                self._log_untracked_hidden(group, hidden_ids, "manual", merged_ids)
                 group_matched = group_hidden = 0
                 examples = []
                 for ch in channels:
@@ -3927,7 +4189,7 @@ class Plugin:
                                 examples.append(f"  '{old_name}' -> '{ch.name}'")
                         stale_when = None if is_matched or not hide_setting_on else self._stale_game_start(ch, sport, events)
                         if self._apply_past_date_hide(ch, is_matched, hide_setting_on, hidden_ids, grace_hours, provider_tz,
-                                                      stale_when=stale_when):
+                                                      stale_when=stale_when, merged_ids=merged_ids):
                             hidden_ids_changed = True
                             if not was_hidden_by_us and ch.id in hidden_ids:
                                 group_hidden += 1
@@ -3935,7 +4197,7 @@ class Plugin:
                         LOGGER.warning(f"EPG & Sports Editor: sports editor EPG match failed for '{ch.name}': {e}")
                 self._log_hidden_diff(
                     group, hide_setting_on, hidden_before, self._hidden_channel_snapshot(group.id),
-                    hidden_ids, "manual",
+                    hidden_ids, "manual", merged_ids,
                 )
                 total_scanned += len(channels)
                 total_matched += group_matched
@@ -3949,7 +4211,12 @@ class Plugin:
                 lines.extend(examples)
             if hidden_ids_changed or hidden_ids != hidden_persisted:
                 self._save_hidden_past_state(epg_source, hidden_ids, hidden_persisted)
-        if total_matched:
+            try:
+                merged_changed = self._merge_duplicate_channels(settings, sport_groups, epg_source)
+            except Exception as e:
+                merged_changed = False
+                LOGGER.warning(f"EPG & Sports Editor: duplicate-channel merge failed: {e}")
+        if total_matched or merged_changed:
             _invalidate_epg_output_cache()
         self._mark_epg_source_success(
             epg_source, f"Sports Editor: {total_matched} channel(s) matched, {total_scanned} scanned"
@@ -3976,6 +4243,7 @@ class Plugin:
             return {"success": True, "message": "No channel groups have the Sports Editor enabled with a Sport Template — nothing to release."}
         epg_source = self._sports_editor_epg_source()
         tracked, _persisted = self._load_hidden_past_state(epg_source)
+        tracked |= _merged_dup_ids(epg_source)      # hidden on purpose by the duplicate-merge feature
         group_ids = [g.id for g, _ in sport_groups]
         orphans = list(
             Channel.objects.filter(

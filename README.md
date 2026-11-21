@@ -19,6 +19,17 @@ Dispatcharr 0.34 introduced the plugin format 0.6 is built on, so 0.6 cannot be 
 
 **Upgrading from 0.5.x on Dispatcharr 0.34+?** Update from the plugin page. Your settings, virtual EPGs and sports-editor groups are kept, and the Include / Exclude / Fill group fields convert to the new pickers automatically. There is no Restart Dispatcharr step any more.
 
+**What's new in 0.6.02**
+- **Merge duplicate game channels from different providers** (opt-in, GitHub #35). When two or more of your providers each create their own channel for the *same* game, the plugin can keep one visible channel and add the other providers' streams to it as backups, so a buffering or failing stream rolls over to the next provider instead of you hunting for another channel. The extra channels are hidden, never deleted, so Dispatcharr's Auto Channel Sync doesn't recreate them. Turn it on per channel group with **Merge duplicate game channels from different providers**. Details, limits and how it undoes itself: [Merging duplicate game channels](docs/SPORT_TEMPLATES.md#merging-duplicate-game-channels-from-different-providers-v0602).
+
+![One game channel with three streams (one per provider), and the two hidden duplicate channels below it](docs/screenshots/v061_merged_channel_hidden_duplicates.png)
+
+- **Global Sports Editor settings are easy to find** (GitHub #36). **Game Thumbs Base URL**, **Pregame Window**, **Postgame Window**, **Hide Past-Date Channels After** and **Local Display Timezone** used to sit at the bottom of the *last* channel group's collapsed section, so they could only be found by opening that group. They now have their own **Sports Editor — Global Settings** section below the channel groups.
+
+![The Sports Editor — Global Settings section, below the channel group sections](docs/screenshots/v061_global_settings_section.png)
+
+- **After updating:** the merge needs each channel's game identity, which the plugin records when it matches a channel. Channels matched by an earlier version get it the next time their provider refreshes, or when you click **Run Sport Templates Now**. Until then those channels are simply not merged.
+
 **What's new in 0.6.01**
 - **Schedules Direct re-parse count fixed.** After a Schedules Direct source refreshed, the log said `re-parsed 0/N` and warned `did not run: SD guide fetch complete` for every entry, even though Dispatcharr had fetched the guide. That message is Dispatcharr's success result for Schedules Direct, and the plugin counted it as a skip. It now counts as a success. Only the count and the warnings were wrong; the guide data itself was already being refreshed. Not yet confirmed on a live Schedules Direct account (see the FAQ entry on virtual EPGs going stale).
 
@@ -73,6 +84,8 @@ For channels that have no EPG data at all, EPG & Sports Editor can generate a re
 ### Sports Editor
 
 For channel groups that Dispatcharr's Auto Channel Sync populates automatically (e.g. an NFL Game Pass stream group), EPG & Sports Editor can rename the auto-created channels using a dedicated rule set — configured per channel group, separate from the EPG Sources rules above. It runs automatically right after each successful M3U refresh, and only ever touches auto-created channels, never manually-added ones.
+
+If several providers each create a channel for the same game, a group can also opt into **merging them into one channel** with the other providers' streams as backups (see [Merging duplicate game channels](docs/SPORT_TEMPLATES.md#merging-duplicate-game-channels-from-different-providers-v0602)).
 
 Each channel group can also opt into **Sport Templates** (below) instead of, or alongside, plain rename rules — matching auto-created channels against a live public sports schedule and generating real channel names, logos, and a Pregame/Live/Postgame EPG from actual game data.
 
@@ -379,7 +392,12 @@ One section appears per Dispatcharr channel group. Per-group settings:
 | **Sport Template** | Pick a sport (95 supported — see the [full league list](docs/SPORT_TEMPLATES.md#full-league-list)), **Any Sport** for [Network Channels](#network-channels) (channels named after a broadcast network instead of two teams), or none, to match this group's auto-created channels against live game data instead of/alongside rename rules. See the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md)**. |
 | **Sports Channel Rename Rules** | Rules applied to auto-created channel names in this group. Same format as EPG Sources rules above, but a separate rule set per group. Used as a fallback when no Sport Template match is found (or always, if no Sport Template is selected). |
 | **Hide auto-created channels with a past date in their name** | Off by default. For a channel that never matches a real game but whose raw name shows an already-past date/time, hide it (Dispatcharr's `hidden_from_output`, requires Dispatcharr v0.26.0+) instead of leaving it visible. Only ever un-hides a channel this feature itself hid; turning the setting off un-hides everything it hid (v0.5.09+). Which channels it hid is stored in the database, so a Dispatcharr restart or update no longer makes it forget them (v0.5.15+). **v0.5.23:** a name with a time but no date (`NFL 03: Texans @ Browns 1:00 PM`) is now hidden too once the game is over — the plugin finds that game in the schedule's last two weeks of finished games. See the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#hiding-auto-created-channels-with-a-past-date-in-their-name-v0502)**. |
+| **Merge duplicate game channels from different providers** | Off by default (v0.6.02+). When several M3U accounts each create a channel for the same game, keeps one visible channel, adds the other providers' streams to it as backups and hides the extra channels. Needs a Sport Template selected for the group; works across every group that has this turned on. Only hides, never deletes; undone automatically when the game is over, when a channel is reused for another game, or when you turn it off. See [Merging duplicate game channels](docs/SPORT_TEMPLATES.md#merging-duplicate-game-channels-from-different-providers-v0602). |
 | **Hide Past-Date Channels After (hours past the start time)** | Global, default 4 hours (v0.5.07+). How long after the game's **start time** (the exact kickoff the plugin stored when it matched the channel, or the time written in the channel's raw name) a channel that no longer matches a game counts as "past" and gets hidden. Counted from the start, not the end — and a channel still inside its match window (game length + Postgame Window) is never hidden, so with a long Postgame Window the channel hides when that window ends instead. See the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#hiding-auto-created-channels-with-a-past-date-in-their-name-v0502)**. |
+
+Below the channel groups, a **Sports Editor — Global Settings** section holds the settings shared by every group and sport: **Game Thumbs Base URL**, **Pregame Window**, **Postgame Window**, **Hide Past-Date Channels After** and **Local Display Timezone** (described in the table below).
+
+![The Sports Editor — Global Settings section](docs/screenshots/v061_global_settings_section.png)
 
 ### Sport Templates
 
@@ -517,6 +535,15 @@ Fixed in v0.5.01. Some providers put a literal `@` between the feed tag and the 
 
 **A channel matched the wrong date — same two teams, but a game days away instead of the one named in the channel's own text.**
 Two fixes for the same symptom. (1) v0.5.02: when the correct date's game *and* a same-teams rematch were both still inside the matching window (a home-and-home, or a best-of playoff series), the tie-break let "which row's team order matches" outrank "which date is closest to right now" — fixed by checking date proximity first. (2) v0.5.05, a deeper case: a *stale* channel whose own named game had aged completely out of the window had no correct candidate left at all, so an unrelated future rematch won by default. Now, whenever the channel's raw name has a parseable date (most provider formats embed one), a match whose real date disagrees by more than 36 hours is rejected outright rather than trusted — see [the matching engine](docs/SPORT_TEMPLATES.md#the-matching-engine-explained) for the details.
+
+**I have several providers and each makes its own channel for the same game. Can I get one channel with all the streams?**
+Yes, as of v0.6.02. Turn on **Merge duplicate game channels from different providers** in that channel group's section. The plugin keeps one channel per game, adds the other providers' streams to it as backups (in order, so the next one takes over if the first fails) and hides the extra channels. The extra channels are hidden rather than deleted so Auto Channel Sync doesn't bring them back. Channels from the *same* provider are never merged with each other, and neither are network channels (`ESPN2`, `NCAAF 06: ABC`). See [Merging duplicate game channels](docs/SPORT_TEMPLATES.md#merging-duplicate-game-channels-from-different-providers-v0602).
+
+**Merge is on but my duplicate channels aren't merging.**
+Check, in order: the group has a **Sport Template** selected; every provider's channel for that game has actually been matched (renamed to the same game name); the channels come from *different* M3U accounts; neither channel was hidden by you; and the game hasn't finished. After updating from an older version, channels matched before the update are picked up when their provider next refreshes, or immediately if you click **Run Sport Templates Now**. The plugin log lines containing `duplicate merge` say what it did.
+
+**Where is the Local Display Timezone setting?**
+In the **Sports Editor — Global Settings** section, below the channel-group sections and above Sport Templates. Before v0.6.02 it appeared inside the last channel group's collapsed section, which made it easy to miss.
 
 **Can a stale numbered channel showing yesterday's game be hidden until the provider refreshes it?**
 Yes, as of v0.5.02 — turn on **Hide auto-created channels with a past date in their name** for that group. See [the Settings Reference](#sports-editor) above and the **[Sport Templates Guide](docs/SPORT_TEMPLATES.md#hiding-auto-created-channels-with-a-past-date-in-their-name-v0502)** for how it decides and how un-hiding works.
