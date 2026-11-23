@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-23T01:50:50Z",
+  "generated_at": "2026-11-23T19:17:42Z",
   "manifest": {
     "slug": "epg-and-sports-editor",
     "name": "EPG & Sports Editor",
@@ -7,19 +7,29 @@
     "author": "jstevenscl",
     "registry_url": "https://github.com/jstevenscl/epg-and-sports-editor",
     "registry_name": "jstevenscl/epg-and-sports-editor",
-    "last_updated": "2026-11-23T01:50:50Z",
+    "last_updated": "2026-11-23T19:17:42Z",
     "latest": {
-      "version": "0.6.03",
-      "url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.6.03/epg-and-sports-editor-v0.6.03.zip",
-      "checksum_md5": "f93affbbae82b8eda873be40a8901184",
-      "checksum_sha256": "6e6ca867cad1746466a622a7a9a2a05aec4b3c62cbe37e4a109bac908ce88bef",
-      "size": 194791,
-      "last_updated": "2026-11-23T01:50:50Z",
-      "build_timestamp": "2026-11-23T01:50:50Z",
+      "version": "0.6.04",
+      "url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.6.04/epg-and-sports-editor-v0.6.04.zip",
+      "checksum_md5": "9753a3a479aaf62eb5f330042bde75bb",
+      "checksum_sha256": "47ca738443a1bcd40531756fa8ad966d4bc3393880c6f64081ff31afeeff55e6",
+      "size": 195613,
+      "last_updated": "2026-11-23T19:17:42Z",
+      "build_timestamp": "2026-11-23T19:17:42Z",
       "min_dispatcharr_version": "0.34.0",
-      "latest_url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.6.03/epg-and-sports-editor-v0.6.03.zip"
+      "latest_url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.6.04/epg-and-sports-editor-v0.6.04.zip"
     },
     "versions": [
+      {
+        "version": "0.6.04",
+        "url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.6.04/epg-and-sports-editor-v0.6.04.zip",
+        "checksum_md5": "9753a3a479aaf62eb5f330042bde75bb",
+        "checksum_sha256": "47ca738443a1bcd40531756fa8ad966d4bc3393880c6f64081ff31afeeff55e6",
+        "size": 195613,
+        "last_updated": "2026-11-23T19:17:42Z",
+        "build_timestamp": "2026-11-23T19:17:42Z",
+        "min_dispatcharr_version": "0.34.0"
+      },
       {
         "version": "0.6.03",
         "url": "https://github.com/jstevenscl/epg-and-sports-editor/releases/download/v0.6.03/epg-and-sports-editor-v0.6.03.zip",
