@@ -47,6 +47,8 @@ On the plugin page, open the **SPORTS EDITOR** section in the Settings column. F
 
 In that same group's section, set **Sport Template** to the sport this group carries. Leave it at **(none — regex rules only)** if you just want the plain Rename Rules behavior with no live-schedule matching.
 
+The list is alphabetical (v0.6.03+), with **(none)** and **Any Sport** pinned at the top, and the per-sport template sections further down the settings page follow the same order.
+
 EPG & Sports Editor wires up every league sports-data-platform exposes with real event history (confirmed against SDP's own league registry as of 2026-08-16) — see [Full League List](#full-league-list) below for the complete set of 95 leagues across soccer, baseball, softball, volleyball, basketball, football, tennis, golf, motorsports, MMA, boxing, darts, and more.
 
 > **Two different matching engines run under the hood, per sport.** Most sports are "matchup" sports — the channel name is split into two competitors (`Team A @ Team B`, `Player A vs Player B` for tennis/UFC) and each side is matched independently. Golf (PGA TOUR/LPGA), NASCAR, Formula 1, World Surf League, and Sport Fishing Championship are "single-title" sports — there's no two-sided split; SDP has one descriptive broadcast-feed title per event (e.g. `FedEx St. Jude Championship: McIlroy Group (Third Round)`), and matching is fuzzy title scoring instead. You don't need to configure this — it's automatic per sport — but it explains why single-title templates use `{event_title}` instead of `{away_team_pascal}`/`{home_team_pascal}`, and why that matching is inherently more heuristic (see [Golf & NASCAR matching caveats](#golf--nascar-matching-caveats) below — the same caveats apply to F1/WSL/fishing).

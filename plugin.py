@@ -679,6 +679,9 @@ _PERSON_VS_PERSON_SPORTS = {"atp", "wta", "ufc", "most-valuable-promotions",
 # Stripping is a conservative heuristic (only removes leading tag prefixes and
 # trailing date/tag suffixes — see docs/SPORT_TEMPLATES.md) so applying it
 # universally carries no real regression risk.
+# Alphabetical by label for the Sport Template dropdown and the per-sport sections
+# (the dict itself stays in grouping order; nothing keys off its order).
+_SPORT_TEMPLATES_SORTED = sorted(_SPORT_TEMPLATES.items(), key=lambda kv: kv[1].casefold())
 _NOISE_STRIP_SPORTS = set(_SPORT_TEMPLATES)
 
 # ── Provider-noise stripping (golf/NASCAR/tennis auto-sync channel names) ──
@@ -1312,7 +1315,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.6.02"
+    version = "0.6.03"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1582,7 +1585,7 @@ class Plugin:
                     "options": (
                         [{"value": "none", "label": "(none — regex rules only)"},
                          {"value": _ANY_SPORT_VALUE, "label": _ANY_SPORT_LABEL}]
-                        + [{"value": k, "label": v} for k, v in _SPORT_TEMPLATES.items()]
+                        + [{"value": k, "label": v} for k, v in _SPORT_TEMPLATES_SORTED]
                     ),
                     "help_text": (
                         "When set, auto-created channels are matched against live schedule data "
@@ -1801,7 +1804,7 @@ class Plugin:
             },
         ]
 
-        for slug, label in _SPORT_TEMPLATES.items():
+        for slug, label in _SPORT_TEMPLATES_SORTED:
             defaults = self._sport_default_templates(slug)
             fields += [
                 {

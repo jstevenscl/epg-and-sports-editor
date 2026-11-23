@@ -19,6 +19,9 @@ Dispatcharr 0.34 introduced the plugin format 0.6 is built on, so 0.6 cannot be 
 
 **Upgrading from 0.5.x on Dispatcharr 0.34+?** Update from the plugin page. Your settings, virtual EPGs and sports-editor groups are kept, and the Include / Exclude / Fill group fields convert to the new pickers automatically. There is no Restart Dispatcharr step any more.
 
+**What's new in 0.6.03**
+- **The Sport Template list is alphabetical.** The **Sport Template** dropdown in each channel group, and the per-sport template sections further down the settings page, used to follow an arbitrary order that made a league hard to find among 95. Both are now sorted A–Z by name, with **(none)** and **Any Sport** still at the top of the dropdown. Only the display order changed: your saved selections and customized templates are kept as they are.
+
 **What's new in 0.6.02**
 - **Merge duplicate game channels from different providers** (opt-in, GitHub #35). When two or more of your providers each create their own channel for the *same* game, the plugin can keep one visible channel and add the other providers' streams to it as backups, so a buffering or failing stream rolls over to the next provider instead of you hunting for another channel. The extra channels are hidden, never deleted, so Dispatcharr's Auto Channel Sync doesn't recreate them. Turn it on per channel group with **Merge duplicate game channels from different providers**. Details, limits and how it undoes itself: [Merging duplicate game channels](docs/SPORT_TEMPLATES.md#merging-duplicate-game-channels-from-different-providers-v0602).
 
