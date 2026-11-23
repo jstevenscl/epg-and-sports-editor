@@ -1854,8 +1854,8 @@ class Plugin:
                     "default": defaults.get("poster_url", ""),
                     "placeholder": _ARTWORK_EXAMPLES["poster_url"],
                     "help_text": (
-                        "Programme-level <icon> on each generated Pregame/Live/Postgame program: the Primary "
-                        "image in Jellyfin/Emby/Plex (portrait card art). Blank = use the Logo URL, as before. "
+                        "Programme-level <icon> on each generated Pregame/Live/Postgame program: the main artwork "
+                        "guide apps show on program cards (portrait works best). Blank = use the Logo URL, as before. "
                         "game-thumbs serves a portrait 1080x1440 matchup cover at .../cover."
                     ),
                 },
@@ -1866,8 +1866,8 @@ class Plugin:
                     "default": defaults.get("thumb_url", ""),
                     "placeholder": _ARTWORK_EXAMPLES["thumb_url"],
                     "help_text": (
-                        "Written as <image type=\"still\"> on each generated program: Jellyfin's Thumb image, used by "
-                        "landscape (16:9) tiles. Blank = none. game-thumbs serves 1920x1080 at .../thumb?aspect=16-9."
+                        "Written as <image type=\"still\"> on each generated program: landscape (16:9) artwork for "
+                        "wide guide tiles. Blank = none. game-thumbs serves 1920x1080 at .../thumb?aspect=16-9."
                     ),
                 },
                 {
@@ -1877,8 +1877,8 @@ class Plugin:
                     "default": defaults.get("backdrop_url", ""),
                     "placeholder": _ARTWORK_EXAMPLES["backdrop_url"],
                     "help_text": (
-                        "Written as <image type=\"backdrop\"> on each generated program: the background image "
-                        "on a program's detail page. Blank = none."
+                        "Written as <image type=\"backdrop\"> on each generated program: background artwork for "
+                        "a program's detail view. Blank = none."
                     ),
                 },
                 {

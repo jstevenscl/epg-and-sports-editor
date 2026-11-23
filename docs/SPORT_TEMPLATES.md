@@ -368,15 +368,16 @@ All of these are available in every template field (Channel Name, Logo URL, and 
 
 ## Program artwork
 
-Guide apps show a program's image in more than one shape — Jellyfin, for example, uses a **Primary** image on poster
-cards, a **Thumb** on landscape (16:9) tiles such as *On Now*, and a **Backdrop** behind a program's detail page. With
-only the Logo URL, every slot gets the same square crest. The three optional fields give each slot its own image:
+Guide apps can show a program's image in more than one shape: main artwork on program cards (often portrait), a
+landscape (16:9) image on wide tiles, and a backdrop behind a program's detail view. XMLTV carries these as the
+programme's `<icon>` and its `<image type="still">` and `<image type="backdrop">` elements. With only the Logo URL,
+every slot gets the same matchup logo. The three optional fields give each slot its own image:
 
-| Field | Written as | Jellyfin uses it as | Suggested game-thumbs template |
+| Field | Written as | Typically used for | Suggested game-thumbs template |
 |---|---|---|---|
-| **Program Poster URL** | the program's `<icon>` (replaces the Logo URL there; the channel logo is unchanged) | Primary | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/cover?style=1` (portrait, 1080×1440) |
-| **Program Thumb URL** | `<image type="still">` | Thumb | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/thumb?aspect=16-9&style=1` (1920×1080) |
-| **Program Backdrop URL** | `<image type="backdrop">` | Backdrop | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/thumb?aspect=16-9&style=2` (1920×1080) |
+| **Program Poster URL** | the program's `<icon>` (replaces the Logo URL there; the channel logo is unchanged) | main card art | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/cover?style=1` (portrait, 1080×1440) |
+| **Program Thumb URL** | `<image type="still">` | wide (16:9) tiles | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/thumb?aspect=16-9&style=1` (1920×1080) |
+| **Program Backdrop URL** | `<image type="backdrop">` | detail-view background | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/thumb?aspect=16-9&style=2` (1920×1080) |
 
 All three accept the same variables as every other template, and each is shown as the field's placeholder. Leave a
 field blank to turn it off. Dispatcharr exports a program's `custom_properties["images"]` as XMLTV `<image>`

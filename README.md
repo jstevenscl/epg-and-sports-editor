@@ -410,7 +410,7 @@ One section appears per sport. Each defines the templates used when a channel gr
 |---|---|
 | **Channel Name** | Renames the matched auto-created channel |
 | **Logo URL** | Assigned as the channel's logo |
-| **Program Poster / Thumb / Backdrop URL** (optional) | Per-program artwork in the shapes guide apps use: Poster replaces the Logo URL as the program's `<icon>` (Primary, portrait cards), Thumb is written as `<image type="still">` (Jellyfin's 16:9 Thumb) and Backdrop as `<image type="backdrop">` (detail-page background). Blank = off |
+| **Program Poster / Thumb / Backdrop URL** (optional) | Per-program artwork in the shapes guide apps use: Poster replaces the Logo URL as the program's `<icon>` (main card art, portrait works best), Thumb is written as `<image type="still">` (16:9 tiles) and Backdrop as `<image type="backdrop">` (detail-view background). Blank = off |
 | **Pregame Title / Description** | EPG block from the start of the Pregame Window (below) through kickoff |
 | **Live Title / Description** | EPG block covering the estimated game window |
 | **Postgame Title / Description** | EPG block from the estimated end through the end of the Postgame Window (below) |
