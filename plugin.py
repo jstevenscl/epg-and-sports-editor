@@ -1259,6 +1259,9 @@ _ROUND_DIGIT_RE = re.compile(r'\bround\s*\d\b', re.IGNORECASE)
 _MATCHUP_DEFAULTS = {
     "channel_name": "{away_team_pascal} @ {home_team_pascal}",
     "logo_url": "{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/logo?style=1",
+    "poster_url": "",
+    "thumb_url": "",
+    "backdrop_url": "",
     "pre_title": "{away_team_pascal} @ {home_team_pascal} - Pregame",
     "pre_desc": "{start_day}, {start_date} at {start_time_et_ct}{broadcast_line}{venue_line}",
     "live_title": "{away_team_pascal} @ {home_team_pascal}",
@@ -1269,6 +1272,9 @@ _MATCHUP_DEFAULTS = {
 _PERSON_VS_DEFAULTS = {
     "channel_name": "{away_team_pascal} vs {home_team_pascal}",
     "logo_url": "{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/logo?style=1",
+    "poster_url": "",
+    "thumb_url": "",
+    "backdrop_url": "",
     "pre_title": "{away_team_pascal} vs {home_team_pascal} - Pregame",
     "pre_desc": "{start_day}, {start_date} at {start_time_et_ct}{broadcast_line}{venue_line}",
     "live_title": "{away_team_pascal} vs {home_team_pascal}",
@@ -1279,6 +1285,9 @@ _PERSON_VS_DEFAULTS = {
 _TENNIS_DEFAULTS = {
     "channel_name": "{away_team_pascal} vs {home_team_pascal}",
     "logo_url": "",
+    "poster_url": "",
+    "thumb_url": "",
+    "backdrop_url": "",
     "pre_title": "{away_team_pascal} vs {home_team_pascal} - {round_name}",
     "pre_desc": "{tournament_name}{court_line}, {start_day} {start_date} at {start_time_et_ct}{broadcast_line}",
     "live_title": "{away_team_pascal} vs {home_team_pascal}",
@@ -1289,12 +1298,23 @@ _TENNIS_DEFAULTS = {
 _SINGLE_TITLE_DEFAULTS = {
     "channel_name": "{event_title}",
     "logo_url": "",
+    "poster_url": "",
+    "thumb_url": "",
+    "backdrop_url": "",
     "pre_title": "{event_title} - Pregame",
     "pre_desc": "{start_day}, {start_date} at {start_time_et_ct}{broadcast_line}{venue_line}",
     "live_title": "{event_title}",
     "live_desc": "Live: {event_title}{broadcast_line}{venue_line}",
     "post_title": "{event_title} - Final",
     "post_desc": "{score_line}{venue_line}",
+}
+
+# Example programme-artwork templates shown as field placeholders (not defaults: the
+# artwork fields are opt-in, so existing setups keep exactly one image, the Logo URL).
+_ARTWORK_EXAMPLES = {
+    "poster_url": "{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/cover?style=1",
+    "thumb_url": "{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/thumb?aspect=16-9&style=1",
+    "backdrop_url": "{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/thumb?aspect=16-9&style=2",
 }
 
 _RULE_FORMAT_HELP = (
@@ -1315,7 +1335,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.6.03"
+    version = "0.6.04"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1826,6 +1846,40 @@ class Plugin:
                     "type": "text",
                     "default": defaults["logo_url"],
                     "help_text": "Assigned as the channel's logo when matched.",
+                },
+                {
+                    "id": f"sport_tpl_{slug}_poster_url",
+                    "label": "Program Poster URL (optional)",
+                    "type": "text",
+                    "default": defaults.get("poster_url", ""),
+                    "placeholder": _ARTWORK_EXAMPLES["poster_url"],
+                    "help_text": (
+                        "Programme-level <icon> on each generated Pregame/Live/Postgame program: the main artwork "
+                        "guide apps show on program cards (portrait works best). Blank = use the Logo URL, as before. "
+                        "game-thumbs serves a portrait 1080x1440 matchup cover at .../cover."
+                    ),
+                },
+                {
+                    "id": f"sport_tpl_{slug}_thumb_url",
+                    "label": "Program Thumb URL (optional)",
+                    "type": "text",
+                    "default": defaults.get("thumb_url", ""),
+                    "placeholder": _ARTWORK_EXAMPLES["thumb_url"],
+                    "help_text": (
+                        "Written as <image type=\"still\"> on each generated program: landscape (16:9) artwork for "
+                        "wide guide tiles. Blank = none. game-thumbs serves 1920x1080 at .../thumb?aspect=16-9."
+                    ),
+                },
+                {
+                    "id": f"sport_tpl_{slug}_backdrop_url",
+                    "label": "Program Backdrop URL (optional)",
+                    "type": "text",
+                    "default": defaults.get("backdrop_url", ""),
+                    "placeholder": _ARTWORK_EXAMPLES["backdrop_url"],
+                    "help_text": (
+                        "Written as <image type=\"backdrop\"> on each generated program: background artwork for "
+                        "a program's detail view. Blank = none."
+                    ),
                 },
                 {
                     "id": f"sport_tpl_{slug}_pre_title",
@@ -4007,6 +4061,22 @@ class Plugin:
         # logo show the matchup image instead of generic placeholder art.
         logo_url_tpl = settings.get(f"sport_tpl_{template_slug}_logo_url") or defaults["logo_url"]
         logo_url = self._render_sports_template(logo_url_tpl, vars_base)
+        # Optional programme artwork per image slot (blank = off): Poster replaces the Logo URL
+        # as the programme <icon> (Primary); Thumb and Backdrop are exported by Dispatcharr from
+        # custom_properties["images"] as <image type="still"> / <image type="backdrop">.
+        artwork = {
+            key: self._render_sports_template(
+                settings.get(f"sport_tpl_{template_slug}_{key}") or defaults.get(key, ""), vars_base
+            )
+            for key in ("poster_url", "thumb_url", "backdrop_url")
+        }
+        program_icon = artwork["poster_url"] or logo_url
+        program_images = [
+            img for img in (
+                {"type": "still", "orient": "L", "url": artwork["thumb_url"]},
+                {"type": "backdrop", "orient": "L", "url": artwork["backdrop_url"]},
+            ) if img["url"]
+        ]
 
         if not by_network:
             # The first pass renames a network channel ("NCAAF 06: ABC") to the game name, so on
@@ -4056,7 +4126,8 @@ class Plugin:
                 # game_start_utc is the exact kickoff (from the schedule feed, always UTC), so a
                 # later hide decision never has to re-parse the local time this plugin rendered
                 # into the channel name (zone abbreviations like CET/JST/"+03" can't be read back).
-                custom_properties={**({"icon": logo_url} if logo_url else {}),
+                custom_properties={**({"icon": program_icon} if program_icon else {}),
+                                   **({"images": program_images} if program_images else {}),
                                    GAME_START_PROP_KEY: start.isoformat(),
                                    **({GAME_KEY_PROP_KEY: game_key} if game_key else {})},
             ))

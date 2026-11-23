@@ -19,6 +19,10 @@ Dispatcharr 0.34 introduced the plugin format 0.6 is built on, so 0.6 cannot be 
 
 **Upgrading from 0.5.x on Dispatcharr 0.34+?** Update from the plugin page. Your settings, virtual EPGs and sports-editor groups are kept, and the Include / Exclude / Fill group fields convert to the new pickers automatically. There is no Restart Dispatcharr step any more.
 
+**What's new in 0.6.04**
+- **Program artwork URL templates** (GitHub #37, thanks tylertufano). Each sport's template section now has optional **Poster URL**, **Thumb URL** and **Backdrop URL** fields. Leave them blank and nothing changes. When filled, the poster becomes the program icon in the generated guide and the thumb and backdrop are added as still and backdrop images. See the [Sport Templates Guide](docs/SPORT_TEMPLATES.md).
+- **Restart after an in-place update.** Dispatcharr's background (Celery) workers can keep running the old plugin code after an update, which can make the post-refresh pass behave like the previous version (seen with GitHub #35: merged channels un-hidden after a provider refresh). After updating the plugin, restart the Dispatcharr container once. The earlier "no restart needed" notes in this README only apply to the web UI side.
+
 **What's new in 0.6.03**
 - **The Sport Template list is alphabetical.** The **Sport Template** dropdown in each channel group, and the per-sport template sections further down the settings page, used to follow an arbitrary order that made a league hard to find among 95. Both are now sorted A–Z by name, with **(none)** and **Any Sport** still at the top of the dropdown. Only the display order changed: your saved selections and customized templates are kept as they are.
 
@@ -43,7 +47,7 @@ Dispatcharr 0.34 introduced the plugin format 0.6 is built on, so 0.6 cannot be 
 ![Typing in a group picker finds BEIN SPORTS and beIN SPORTS regardless of case](docs/screenshots/v06_group_picker.png)
 
 - **Slow actions no longer time out.** Setup, Apply Now and Teardown run in Dispatcharr's background queue and report progress, instead of racing the page's 55-second limit.
-- **No restart step.** Dispatcharr loads new plugin code right away, so the *Restart Dispatcharr* action is gone. A new **Refresh Lists** action reloads the plugin so the pickers pick up a new EPG source or channel group.
+- **No restart action.** Dispatcharr loads new plugin code right away for the web UI, so the *Restart Dispatcharr* action is gone. Its background workers can still hold the old code after an update, so restart the container once after updating. A new **Refresh Lists** action reloads the plugin so the pickers pick up a new EPG source or channel group.
 
 ---
 
@@ -115,7 +119,7 @@ Some providers name a channel after the broadcast network instead of two teams �
 - A group of channels that could carry **any** sport during the day (a plain `ABC`, `ESPN2`, or `SEC Network` channel not sorted by league) should select **Any Sport** — matching then searches every league's events for one currently airing on that network, and renders it with that game's own sport's templates (so an ABC channel showing college football at noon and an NBA game at night each get the correct Pregame/Live/Postgame templates automatically).
 - Network matching prefers whatever's live right now, otherwise the soonest upcoming game on that network. If a network genuinely carries two simultaneous games (common for ABC/CBS regional Saturday windows), there's no way to tell which numbered feed is which — the schedule feed doesn't carry regional-feed assignment — so a real tie is left unmatched rather than guessed at.
 
-![Sport Template dropdown showing the Any Sport (network channel) option](docs/screenshots/11_network_channel_any_sport.png)
+![Sport Template dropdown: (none) and Any Sport (network channel) first, then every league in alphabetical order](docs/screenshots/11_network_channel_any_sport.png)
 
 ---
 
@@ -131,7 +135,7 @@ Some providers name a channel after the broadcast network instead of two teams �
    https://jstevenscl.github.io/epg-and-sports-editor/manifest.json
    ```
 3. Click **Add Repo**, then find **EPG & Sports Editor** in the list and install it
-4. Enable the plugin. Dispatcharr loads new plugin code right away, so no restart is needed
+4. Enable the plugin. Dispatcharr loads new plugin code right away for the web UI, but restart the Dispatcharr container after installing or updating so its background workers pick up the new code too
 5. Open the plugin page and configure your settings, then click **Save**
 
 ### Manual Install
@@ -410,6 +414,7 @@ One section appears per sport. Each defines the templates used when a channel gr
 |---|---|
 | **Channel Name** | Renames the matched auto-created channel |
 | **Logo URL** | Assigned as the channel's logo |
+| **Program Poster / Thumb / Backdrop URL** (optional) | Per-program artwork in the shapes guide apps use: Poster replaces the Logo URL as the program's `<icon>` (main card art, portrait works best), Thumb is written as `<image type="still">` (16:9 tiles) and Backdrop as `<image type="backdrop">` (detail-view background). Blank = off |
 | **Pregame Title / Description** | EPG block from the start of the Pregame Window (below) through kickoff |
 | **Live Title / Description** | EPG block covering the estimated game window |
 | **Postgame Title / Description** | EPG block from the estimated end through the end of the Postgame Window (below) |

@@ -57,23 +57,24 @@ EPG & Sports Editor wires up every league sports-data-platform exposes with real
 
 > **`Any Sport (network channel — match by network, not teams)` (v0.5.00+)** is a third option alongside a specific league and `(none)`, for channels named after a broadcast network instead of two teams (`ESPN2`, `SEC Network`, a numbered `NCAAF 06: ABC` feed). See [Network Channel matching](#the-matching-engine-explained) below and [Network Channels](../README.md#network-channels) in the README.
 
-![Sport Template dropdown showing the Any Sport (network channel) option](screenshots/11_network_channel_any_sport.png)
+![Sport Template dropdown: (none) and Any Sport (network channel) first, then every league in alphabetical order](screenshots/11_network_channel_any_sport.png)
 
 ## Step 3 — Review (or customize) that sport's templates
 
-Scroll down to the **SPORT TEMPLATES** section — one sub-section per sport, shared across every group that selects it (templates are defined once per sport, not per group). Each sport has 8 fields:
+Scroll down to the **SPORT TEMPLATES** section — one sub-section per sport, shared across every group that selects it (templates are defined once per sport, not per group). Each sport has 8 fields, plus 3 optional program-artwork fields:
 
 | Field | Used for |
 |---|---|
 | **Channel Name** | Renames the matched channel |
 | **Logo URL** | Assigned as the channel's logo — and, as of v0.5.04, also written onto each generated Pregame/Live/Postgame program as a programme-level XMLTV `<icon>`, so guide apps that show per-program artwork (Jellyfin, Plex) display the matchup image instead of generic placeholder art. No separate setting — it's the same rendered URL, just applied in both places. |
+| **Program Poster URL** / **Program Thumb URL** / **Program Backdrop URL** (optional) | Per-program artwork in different shapes — see [Program artwork](#program-artwork). Blank = off: the program keeps the Logo URL as its only image. |
 | **Pregame Title** / **Pregame Description** | EPG block from the start of the **Pregame Window** through kickoff (see [Pregame and Postgame windows](#pregame-and-postgame-windows)) |
 | **Live Title** / **Live Description** | EPG block covering the estimated game window |
 | **Postgame Title** / **Postgame Description** | EPG block from the estimated end through the end of the **Postgame Window** |
 
 Every field comes pre-filled with a sensible starter template (see [Starter Templates Per League](#starter-templates-per-league) below) — you don't have to touch anything to get a working result. Customize any field using the `{variable}` syntax described next.
 
-![NFL Sport Template — Channel Name, Logo URL, Pregame Title/Description, Live Title defaults](screenshots/08_sport_templates_nfl.png)
+![NFL Sport Template — Channel Name and Logo URL defaults, followed by the optional Program Poster and Thumb URL fields](screenshots/08_sport_templates_nfl.png)
 
 ### Pregame and Postgame windows
 
@@ -364,6 +365,25 @@ All of these are available in every template field (Channel Name, Logo URL, and 
 ![The Sports Editor — Global Settings section, below the channel group sections](screenshots/v061_global_settings_section.png)
 
 ---
+
+## Program artwork
+
+Guide apps can show a program's image in more than one shape: main artwork on program cards (often portrait), a
+landscape (16:9) image on wide tiles, and a backdrop behind a program's detail view. XMLTV carries these as the
+programme's `<icon>` and its `<image type="still">` and `<image type="backdrop">` elements. With only the Logo URL,
+every slot gets the same matchup logo. The three optional fields give each slot its own image:
+
+| Field | Written as | Typically used for | Suggested game-thumbs template |
+|---|---|---|---|
+| **Program Poster URL** | the program's `<icon>` (replaces the Logo URL there; the channel logo is unchanged) | main card art | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/cover?style=1` (portrait, 1080×1440) |
+| **Program Thumb URL** | `<image type="still">` | wide (16:9) tiles | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/thumb?aspect=16-9&style=1` (1920×1080) |
+| **Program Backdrop URL** | `<image type="backdrop">` | detail-view background | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/thumb?aspect=16-9&style=2` (1920×1080) |
+
+![The three optional Program Poster, Thumb and Backdrop URL fields in a sport's template section, blank by default with an example in each](screenshots/v064_program_artwork_fields.png)
+
+All three accept the same variables as every other template, and each is shown as the field's placeholder. Leave a
+field blank to turn it off. Dispatcharr exports a program's `custom_properties["images"]` as XMLTV `<image>`
+elements (`apps/output/epg.py`), which is how the Thumb and Backdrop reach the guide.
 
 ## Game Thumbs & Logo URL Parameters
 
