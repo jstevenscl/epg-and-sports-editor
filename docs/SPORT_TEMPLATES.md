@@ -61,12 +61,13 @@ EPG & Sports Editor wires up every league sports-data-platform exposes with real
 
 ## Step 3 — Review (or customize) that sport's templates
 
-Scroll down to the **SPORT TEMPLATES** section — one sub-section per sport, shared across every group that selects it (templates are defined once per sport, not per group). Each sport has 8 fields:
+Scroll down to the **SPORT TEMPLATES** section — one sub-section per sport, shared across every group that selects it (templates are defined once per sport, not per group). Each sport has 8 fields, plus 3 optional program-artwork fields:
 
 | Field | Used for |
 |---|---|
 | **Channel Name** | Renames the matched channel |
 | **Logo URL** | Assigned as the channel's logo — and, as of v0.5.04, also written onto each generated Pregame/Live/Postgame program as a programme-level XMLTV `<icon>`, so guide apps that show per-program artwork (Jellyfin, Plex) display the matchup image instead of generic placeholder art. No separate setting — it's the same rendered URL, just applied in both places. |
+| **Program Poster URL** / **Program Thumb URL** / **Program Backdrop URL** (optional) | Per-program artwork in different shapes — see [Program artwork](#program-artwork). Blank = off: the program keeps the Logo URL as its only image. |
 | **Pregame Title** / **Pregame Description** | EPG block from the start of the **Pregame Window** through kickoff (see [Pregame and Postgame windows](#pregame-and-postgame-windows)) |
 | **Live Title** / **Live Description** | EPG block covering the estimated game window |
 | **Postgame Title** / **Postgame Description** | EPG block from the estimated end through the end of the **Postgame Window** |
@@ -364,6 +365,22 @@ All of these are available in every template field (Channel Name, Logo URL, and 
 ![The Sports Editor — Global Settings section, below the channel group sections](screenshots/v061_global_settings_section.png)
 
 ---
+
+## Program artwork
+
+Guide apps show a program's image in more than one shape — Jellyfin, for example, uses a **Primary** image on poster
+cards, a **Thumb** on landscape (16:9) tiles such as *On Now*, and a **Backdrop** behind a program's detail page. With
+only the Logo URL, every slot gets the same square crest. The three optional fields give each slot its own image:
+
+| Field | Written as | Jellyfin uses it as | Suggested game-thumbs template |
+|---|---|---|---|
+| **Program Poster URL** | the program's `<icon>` (replaces the Logo URL there; the channel logo is unchanged) | Primary | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/cover?style=1` (portrait, 1080×1440) |
+| **Program Thumb URL** | `<image type="still">` | Thumb | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/thumb?aspect=16-9&style=1` (1920×1080) |
+| **Program Backdrop URL** | `<image type="backdrop">` | Backdrop | `{gamethumbs_base}/{league_slug}/{away_team}/{home_team}/thumb?aspect=16-9&style=2` (1920×1080) |
+
+All three accept the same variables as every other template, and each is shown as the field's placeholder. Leave a
+field blank to turn it off. Dispatcharr exports a program's `custom_properties["images"]` as XMLTV `<image>`
+elements (`apps/output/epg.py`), which is how the Thumb and Backdrop reach the guide.
 
 ## Game Thumbs & Logo URL Parameters
 
