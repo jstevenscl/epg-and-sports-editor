@@ -1335,7 +1335,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.6.04"
+    version = "0.6.05"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -1838,7 +1838,13 @@ class Plugin:
                     "label": "Channel Name",
                     "type": "text",
                     "default": defaults["channel_name"],
-                    "help_text": "Renames the auto-created channel when matched to a game. " + self._SPORT_TEMPLATE_VAR_HELP,
+                    "help_text": (
+                        "Renames the auto-created channel when matched to a game. " + self._SPORT_TEMPLATE_VAR_HELP
+                        + " Channel Name only: {stream_count} (number of streams on the channel), "
+                        "{stream_count_tag} (' (3)' when the channel has more than one stream, otherwise nothing) "
+                        "and {stream_star} (' *' when more than one stream, otherwise nothing). Handy with "
+                        "'Merge duplicate game channels'; each carries its own leading space."
+                    ),
                 },
                 {
                     "id": f"sport_tpl_{slug}_logo_url",
@@ -3462,6 +3468,53 @@ class Plugin:
         }
 
     @staticmethod
+    def _stream_count_vars(ch):
+        """Template variables describing how many streams `ch` has right now (Channel Name only):
+        {stream_count} is the number; {stream_count_tag} is " (3)" and {stream_star} is " *",
+        both EMPTY when the channel has just one stream, and both carry their own leading space,
+        so "{away_team_pascal} @ {home_team_pascal}{stream_count_tag}" never leaves a trailing
+        space. Read from the database each pass: a merged channel (see
+        _merge_duplicate_channels) counts the streams that feature added. On any error the
+        count is treated as 1, so a failure here can only ever hide the marker, never break
+        the rename."""
+        try:
+            from apps.channels.models import ChannelStream
+            n = ChannelStream.objects.filter(channel_id=ch.id).count()
+        except Exception:
+            n = 1
+        n = max(int(n), 1)
+        return {
+            "stream_count": str(n),
+            "stream_count_tag": f" ({n})" if n > 1 else "",
+            "stream_star": " *" if n > 1 else "",
+        }
+
+    def _rename_after_merge(self, settings, sport_groups, events, epg_source):
+        """The merge pass runs AFTER the per-channel rename, so a channel it just gave extra
+        streams (or took them back from) was named with the old stream count. When any saved
+        Channel Name template uses a stream-count variable, re-process just the channels the
+        merge touched so the name, and the generated guide that carries the same name, show
+        the current count. Does nothing otherwise, so existing setups never pay for it."""
+        touched = getattr(self, "_merge_touched", None) or set()
+        self._merge_touched = set()
+        if not touched or not events:
+            return
+        uses = any(
+            isinstance(v, str) and "{stream_" in v
+            for k, v in (settings or {}).items()
+            if str(k).startswith("sport_tpl_") and str(k).endswith("_channel_name")
+        )
+        if not uses:
+            return
+        from apps.channels.models import Channel
+        for group, sport in sport_groups:
+            for ch in Channel.objects.filter(auto_created=True, channel_group=group, id__in=touched):
+                try:
+                    self._process_sports_editor_channel(ch, sport, events, settings, epg_source)
+                except Exception as exc:
+                    LOGGER.warning(f"EPG & Sports Editor: re-naming merged channel '{ch.name}' failed: {exc}")
+
+    @staticmethod
     def _render_sports_template(template_str, vars_dict):
         if not template_str:
             return ""
@@ -3651,6 +3704,10 @@ class Plugin:
                         f"EPG & Sports Editor: duplicate merge: channel {pid} '{names.get(pid, '')}' now has "
                         f"{added} added backup stream(s); hid {n} duplicate channel(s) {entry['dups']}"
                     )
+
+            # Primaries whose stream count may have changed (merged now, or released now), so the
+            # caller can refresh their names when a Channel Name template shows the count.
+            self._merge_touched = set(desired) | set(prev_primaries)
 
             new_state = {str(pid): {"dups": sorted(e["dups"]), "streams": e["streams"]} for pid, e in desired.items()}
             if new_state != old_state:
@@ -4046,6 +4103,9 @@ class Plugin:
         vars_base = self._build_sdp_template_vars(
             event, gamethumbs_base, league_label, "pregame", feed_tag=feed_tag, display_tz=display_tz
         )
+        # Channel Name only: how many streams this channel has right now (own + any added by
+        # the duplicate-merge feature). See _stream_count_vars.
+        vars_base.update(self._stream_count_vars(ch))
 
         channel_name_tpl = settings.get(f"sport_tpl_{template_slug}_channel_name") or defaults["channel_name"]
         new_name = self._render_sports_template(channel_name_tpl, vars_base)
@@ -4199,6 +4259,8 @@ class Plugin:
                 self._save_hidden_past_state(epg_source, hidden_ids, hidden_persisted)
             try:
                 merged_changed = self._merge_duplicate_channels(settings, sport_groups, epg_source)
+                if merged_changed:
+                    self._rename_after_merge(settings, sport_groups, events, epg_source)
             except Exception as e:
                 merged_changed = False
                 LOGGER.warning(f"EPG & Sports Editor: duplicate-channel merge failed: {e}")
@@ -4287,6 +4349,8 @@ class Plugin:
                 self._save_hidden_past_state(epg_source, hidden_ids, hidden_persisted)
             try:
                 merged_changed = self._merge_duplicate_channels(settings, sport_groups, epg_source)
+                if merged_changed:
+                    self._rename_after_merge(settings, sport_groups, events, epg_source)
             except Exception as e:
                 merged_changed = False
                 LOGGER.warning(f"EPG & Sports Editor: duplicate-channel merge failed: {e}")

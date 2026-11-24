@@ -190,6 +190,26 @@ In that example, channel 90179 is the visible channel and carries a stream from 
 
 **Checking what it did.** Each time the merge changes something, the plugin log has a line like `duplicate merge: channel 56853 'Georgia Bulldogs @ South Carolina Gamecocks' now has 2 added backup stream(s); hid 2 duplicate channel(s) [56883, 56886]`, and `duplicate merge: un-hid ...` / `removed ... added stream(s)` when it releases one.
 
+### Showing how many streams a channel has (v0.6.05+)
+
+A merged channel carries a stream from each provider, but in your client it looks like any other channel. If you want to see which channels have backups, put one of these variables in the sport's **Channel Name** template (Settings, Sport Templates, your sport):
+
+| Variable | Result |
+|---|---|
+| `{stream_count}` | The number of streams on the channel: `3` |
+| `{stream_count_tag}` | ` (3)` when the channel has more than one stream, nothing at all when it has one |
+| `{stream_star}` | ` *` when the channel has more than one stream, nothing at all when it has one |
+
+`{stream_count_tag}` and `{stream_star}` carry their own leading space, so you add them straight after the name with no space of your own. For example, a Channel Name of `{away_team_pascal} @ {home_team_pascal}{stream_count_tag}` gives:
+
+![Channels page: Detroit Pistons @ Orlando Magic (3) and Boston Celtics @ Washington Wizards (2) are merged channels; Dallas Mavericks @ Denver Nuggets has one stream and no marker; the hidden duplicates keep their plain names](screenshots/v065_stream_count_in_channel_name.png)
+
+- It is off unless you add a variable to a template. Existing channel names do not change.
+- It counts the streams actually on the channel, whether they came from a merge or the provider put several on one channel.
+- The hidden duplicates are not renamed. Only the visible channel shows the count.
+- The count follows the merge. When a merge is released, the added streams are removed and the name goes back to having no marker.
+- It is available in **Channel Name** only, not in program titles or descriptions.
+
 ## Step 4 — Run it
 
 - **Automatically**: nothing to do — it runs right after every successful M3U refresh, immediately after Rename Rules.
@@ -352,6 +372,10 @@ All of these are available in every template field (Channel Name, Logo URL, and 
 | `{result_line}` | ` — Novak Djokovic bt Thiago Agustin Tirante 6-2 6-4` | Pre-formatted with a leading " — ", blank until the match has a result |
 | `{feed_tag}` | `HOME` | Populated when your provider runs separate regional-broadcast channels for the same game, tagged `HOME`/`AWAY`/`NATIONAL` right before the date/time in the raw auto-sync name (e.g. `... Baltimore Orioles HOME 23 Aug 01:35 PM ET`) — confirmed on MLB, and the same shape applies to any matchup sport (NBA, NFL, etc.) whose provider tags feeds this way. Blank for every other provider. |
 | `{feed_line}` | ` (Home Feed)` | Pre-formatted from `{feed_tag}` — blank (not just empty) when there's no feed tag, so a shared Channel Name template doesn't grow a dangling suffix for providers that don't split feeds |
+
+| `{stream_count}` | `3` | **Channel Name only.** How many streams the channel has right now (1 when it has just one). See [Showing how many streams a channel has](#showing-how-many-streams-a-channel-has-v0605) |
+| `{stream_count_tag}` | ` (3)` | **Channel Name only.** Blank when the channel has one stream, ` (N)` when it has more. Carries its own leading space |
+| `{stream_star}` | ` *` | **Channel Name only.** Blank when the channel has one stream, ` *` when it has more. Carries its own leading space |
 
 **Tip:** `{broadcast_line}` and `{venue_line}` already include their own leading space and connector word — just append them directly to a sentence, don't add your own " on " / " at " in front of them.
 

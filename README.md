@@ -19,6 +19,9 @@ Dispatcharr 0.34 introduced the plugin format 0.6 is built on, so 0.6 cannot be 
 
 **Upgrading from 0.5.x on Dispatcharr 0.34+?** Update from the plugin page. Your settings, virtual EPGs and sports-editor groups are kept, and the Include / Exclude / Fill group fields convert to the new pickers automatically. There is no Restart Dispatcharr step any more.
 
+**What's new in 0.6.05**
+- **Show how many streams a channel has** (GitHub #35, suggested by booyakafoo). New Channel Name variables: `{stream_count}` (`3`), `{stream_count_tag}` (` (3)`) and `{stream_star}` (` *`). The last two show nothing when the channel has a single stream, so only channels with backups get a marker, for example a Channel Name of `{away_team_pascal} @ {home_team_pascal}{stream_count_tag}` gives `Detroit Pistons @ Orlando Magic (3)`. Handy with **Merge duplicate game channels**, and useful in clients like Kodi where the channel name is what you see. Off unless you add a variable to a template. See the [Sport Templates Guide](docs/SPORT_TEMPLATES.md#showing-how-many-streams-a-channel-has-v0605).
+
 **What's new in 0.6.04**
 - **Program artwork URL templates** (GitHub #37, thanks tylertufano). Each sport's template section now has optional **Poster URL**, **Thumb URL** and **Backdrop URL** fields. Leave them blank and nothing changes. When filled, the poster becomes the program icon in the generated guide and the thumb and backdrop are added as still and backdrop images. See the [Sport Templates Guide](docs/SPORT_TEMPLATES.md).
 - **Restart after an in-place update.** Dispatcharr's background (Celery) workers can keep running the old plugin code after an update, which can make the post-refresh pass behave like the previous version (seen with GitHub #35: merged channels un-hidden after a provider refresh). After updating the plugin, restart the Dispatcharr container once. The earlier "no restart needed" notes in this README only apply to the web UI side.
