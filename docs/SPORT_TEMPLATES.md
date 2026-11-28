@@ -187,6 +187,18 @@ In that example, channel 90179 is the visible channel and carries a stream from 
 - A stream that a provider has dropped stays attached for as long as Dispatcharr keeps it as a stale stream, the same as it does on any channel.
 - If **Hide auto-created channels with a past date** is also on for the group, the two features cooperate: the hidden duplicates are not un-hidden by it.
 - **Release Stuck Hidden Channels** leaves merged duplicates alone too.
+- When a merge is released and the group's past-date hide is on, each released channel is checked against it straight away (v0.6.06+). If its game is already older than your **Hide Past-Date Channels After** time, it goes back to hidden in the same pass instead of showing up with its raw provider name until its own provider next refreshes. A released channel whose game is still current stays visible.
+
+Three providers carried the same game, so the merge showed one channel (9011) and hid the other two (9000 and 9021, the crossed-out eye):
+
+
+![Merged: one visible channel, two hidden duplicates](screenshots/v066_merged_before_release.png)
+
+
+After the game's Postgame window ended and the visible channel's provider refreshed, the merge was released. The two duplicates stay hidden, and the visible channel went back to its provider name and was hidden by the past-date hide too (before 0.6.06 the two duplicates would have reappeared here):
+
+
+![After the release: all three channels hidden](screenshots/v066_merged_after_release.png)
 
 **Checking what it did.** Each time the merge changes something, the plugin log has a line like `duplicate merge: channel 56853 'Georgia Bulldogs @ South Carolina Gamecocks' now has 2 added backup stream(s); hid 2 duplicate channel(s) [56883, 56886]`, and `duplicate merge: un-hid ...` / `removed ... added stream(s)` when it releases one.
 

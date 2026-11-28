@@ -19,6 +19,9 @@ Dispatcharr 0.34 introduced the plugin format 0.6 is built on, so 0.6 cannot be 
 
 **Upgrading from 0.5.x on Dispatcharr 0.34+?** Update from the plugin page. Your settings, virtual EPGs and sports-editor groups are kept, and the Include / Exclude / Fill group fields convert to the new pickers automatically. There is no Restart Dispatcharr step any more.
 
+**What's new in 0.6.06**
+- **Released duplicates stay hidden when their game is already past** (GitHub #35, reported by booyakafoo). When a merge was released because the game's Postgame window ended, the backup channels from the other providers were un-hidden even though their game was already past your **Hide Past-Date Channels After** time, and they stayed visible with raw provider names until their own provider next refreshed. They are now checked against the past-date hide the moment they are released, so expired duplicates stay hidden. Channels whose game is still current are left visible.
+
 **What's new in 0.6.05**
 - **Show how many streams a channel has** (GitHub #35, suggested by booyakafoo). New Channel Name variables: `{stream_count}` (`3`), `{stream_count_tag}` (` (3)`) and `{stream_star}` (` *`). The last two show nothing when the channel has a single stream, so only channels with backups get a marker, for example a Channel Name of `{away_team_pascal} @ {home_team_pascal}{stream_count_tag}` gives `Detroit Pistons @ Orlando Magic (3)`. Handy with **Merge duplicate game channels**, and useful in clients like Kodi where the channel name is what you see. Off unless you add a variable to a template. See the [Sport Templates Guide](docs/SPORT_TEMPLATES.md#showing-how-many-streams-a-channel-has-v0605).
 

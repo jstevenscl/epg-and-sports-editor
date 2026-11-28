@@ -1335,7 +1335,7 @@ _RULE_FORMAT_HELP = (
 
 class Plugin:
     name = "EPG & Sports Editor"
-    version = "0.6.05"
+    version = "0.6.06"
     description = (
         "Transform EPG program data into virtual EPG sources using "
         "per-source, per-field regex and find/replace rules. "
@@ -3489,6 +3489,37 @@ class Plugin:
             "stream_star": " *" if n > 1 else "",
         }
 
+    def _rehide_released_duplicates(self, settings, sport_groups, events, epg_source):
+        """The merge pass runs after the past-date hide, and un-hides the duplicates it releases.
+        Past-date hide only visits the account that is syncing, so a released duplicate whose
+        game is already past (e.g. the postgame window just ended) would sit visible with its
+        raw provider name until its own provider next synced. Re-run the past-date hide check on
+        just those channels, right after the release. Channels still tied to a current game are
+        left visible."""
+        released = getattr(self, "_merge_released", None) or set()
+        self._merge_released = set()
+        if not released:
+            return False
+        from apps.channels.models import Channel
+        hidden_ids, persisted = self._load_hidden_past_state(epg_source)
+        merged_ids = _merged_dup_ids(epg_source)
+        grace_hours = _past_grace_hours(settings)
+        changed = False
+        for group, sport in sport_groups:
+            if not settings.get(f"sports_editor_{group.id}_hide_past"):
+                continue
+            for ch in Channel.objects.filter(auto_created=True, channel_group=group, id__in=released):
+                try:
+                    stale_when = self._stale_game_start(ch, sport, events) if events else None
+                    if self._apply_past_date_hide(ch, False, True, hidden_ids, grace_hours, None,
+                                                  stale_when=stale_when, merged_ids=merged_ids):
+                        changed = True
+                except Exception as exc:
+                    LOGGER.warning(f"EPG & Sports Editor: past-date hide of released duplicate '{ch.name}' failed: {exc}")
+        if changed or hidden_ids != persisted:
+            self._save_hidden_past_state(epg_source, hidden_ids, persisted)
+        return changed
+
     def _rename_after_merge(self, settings, sport_groups, events, epg_source):
         """The merge pass runs AFTER the per-channel rename, so a channel it just gave extra
         streams (or took them back from) was named with the old stream count. When any saved
@@ -3598,6 +3629,7 @@ class Plugin:
 
         on_groups = [g for g, _ in sport_groups if settings.get(f"sports_editor_{g.id}_merge_dupes")]
         changed = False
+        self._merge_released = set()
         with transaction.atomic():
             src = EPGSource.objects.select_for_update().get(pk=epg_source.pk)
             props = dict(src.custom_properties or {})
@@ -3678,6 +3710,7 @@ class Plugin:
                     n = Channel.objects.filter(pk__in=release, hidden_from_output=True).update(hidden_from_output=False)
                     if n:
                         changed = True
+                        self._merge_released |= release
                         LOGGER.info(f"EPG & Sports Editor: duplicate merge: un-hid {n} channel(s) previously merged into channel {pid}")
                 stale = set(int(x) for x in (entry or {}).get("streams") or ()) - set(new.get("streams") or ())
                 if stale:
@@ -4261,6 +4294,7 @@ class Plugin:
                 merged_changed = self._merge_duplicate_channels(settings, sport_groups, epg_source)
                 if merged_changed:
                     self._rename_after_merge(settings, sport_groups, events, epg_source)
+                    self._rehide_released_duplicates(settings, sport_groups, events, epg_source)
             except Exception as e:
                 merged_changed = False
                 LOGGER.warning(f"EPG & Sports Editor: duplicate-channel merge failed: {e}")
@@ -4351,6 +4385,7 @@ class Plugin:
                 merged_changed = self._merge_duplicate_channels(settings, sport_groups, epg_source)
                 if merged_changed:
                     self._rename_after_merge(settings, sport_groups, events, epg_source)
+                    self._rehide_released_duplicates(settings, sport_groups, events, epg_source)
             except Exception as e:
                 merged_changed = False
                 LOGGER.warning(f"EPG & Sports Editor: duplicate-channel merge failed: {e}")
